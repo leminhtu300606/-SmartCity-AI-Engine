@@ -16,7 +16,8 @@ class RuleBasedEventClassifier:
 
     def evaluate(self, camera_id, memory_manager, frame_bgr):
         candidates = []
-        objects = list(memory_manager.objects.values())
+        # Chỉ đánh giá trên object còn bám dấu -> alert kết thúc đúng lúc sự kiện kết thúc
+        objects = list(memory_manager.visible_objects().values())
         rois = config.CAMERA_ROIS.get(camera_id, [])
 
         # Logic 3: Smoke / Fire

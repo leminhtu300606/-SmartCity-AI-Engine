@@ -5,8 +5,8 @@ import config
 class PersonActionRules:
     """Xử lý ngã, vung tay mạnh, giằng co, xô xát dựa trên Temporal History & Pose."""
 
-    def __init__(self, dt=0.04):
-        self.dt = dt
+    def __init__(self):
+        pass
 
     def check_fall(self, obj):
         """Phát hiện người ngã qua Aspect Ratio, Torso Angle & Gia tốc rơi."""
@@ -69,10 +69,12 @@ class PersonActionRules:
         if len(obj.pose_history) < 3:
             return False
         poses = list(obj.pose_history)
+        times = list(obj.time_history)
         speeds = []
         for i in range(1, min(4, len(poses))):
             if poses[-i] is not None and poses[-i - 1] is not None:
-                speeds.append(self._wrist_speed_between(poses[-i - 1], poses[-i]))
+                dt = max(times[-i] - times[-i - 1], 1e-5)
+                speeds.append(self._wrist_speed_between(poses[-i - 1], poses[-i], dt))
         return max(speeds, default=0.0) > config.GESTURE_WRIST_SPEED_THRESH
 
     def check_person_collision(self, objA, objB):
@@ -117,13 +119,14 @@ class PersonActionRules:
         kp_prev = obj.pose_history[-2]
         if kp_curr is None or kp_prev is None:
             return 0.0
-        return self._wrist_speed_between(kp_prev, kp_curr)
+        dt = max(obj.time_history[-1] - obj.time_history[-2], 1e-5)
+        return self._wrist_speed_between(kp_prev, kp_curr, dt)
 
-    def _wrist_speed_between(self, kp_prev, kp_curr):
+    def _wrist_speed_between(self, kp_prev, kp_curr, dt):
         # Wrist Indices: 9 (Left), 10 (Right)
         speeds = []
         for idx in [9, 10]:
             if kp_curr[idx][2] > 0.3 and kp_prev[idx][2] > 0.3:
-                spd = np.linalg.norm(kp_curr[idx][:2] - kp_prev[idx][:2]) / self.dt
+                spd = np.linalg.norm(kp_curr[idx][:2] - kp_prev[idx][:2]) / dt
                 speeds.append(spd)
         return max(speeds, default=0.0)

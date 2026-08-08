@@ -1,4 +1,5 @@
 from tracker.object_state import TrackedObjectState
+import config
 
 
 class ObjectMemoryManager:
@@ -25,12 +26,17 @@ class ObjectMemoryManager:
                 self.objects[t_id] = TrackedObjectState(t_id, cls_id, maxlen=self.maxlen)
 
             obj = self.objects[t_id]
-            obj.update(bbox, timestamp, pose)
+            obj.last_update_predicted = is_predicted
 
             if is_predicted:
-                # Track dự đoán: không được gia hạn thời gian sống, đếm là bị mất dấu
+                # Track dự đoán: KHÔNG ghi vào history kinematics (velocity/accel/center/pose).
+                # Chỉ lưu bbox để hiển thị. Velocity phải chỉ tính từ detection thật,
+                # nếu không sẽ bị thổi phồng do dt giữa 2 frame detect cách nhau 3 frame.
+                obj.predicted_bbox = bbox
                 obj.missed_frames += 1
             else:
+                obj.update(bbox, timestamp, pose)
+                obj.predicted_bbox = None
                 obj.missed_frames = 0
                 obj.last_updated_frame = frame_idx
             updated_ids.add(t_id)
@@ -47,3 +53,13 @@ class ObjectMemoryManager:
         ]
         for t_id in dead_ids:
             del self.objects[t_id]
+
+    def visible_objects(self):
+        """Chỉ trả về object còn bám dấu (detect thật gần đây); loại object ma.
+
+        Cảnh báo chỉ tính trên object thật để không bị alert sớm/chậm hơn sự kiện.
+        """
+        return {
+            t_id: obj for t_id, obj in self.objects.items()
+            if len(obj.bbox_history) > 0 and obj.missed_frames < config.DETECTION_INTERVAL
+        }

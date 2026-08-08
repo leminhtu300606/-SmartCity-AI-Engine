@@ -27,8 +27,9 @@ class EventVisualizer:
         # 2. Vẽ Track Bounding Boxes (green: person, yellow: vehicle) + HUD đếm
         cls_names = {0: "person", 2: "car", 3: "motorbike", 5: "bus", 7: "truck"}
         class_counts = {}
-        for t_id, obj in self._visible_objects(memory_manager).items():
-            box = self._to_int_bbox(obj.bbox_history[-1])
+        for t_id, obj in memory_manager.visible_objects().items():
+            latest_box = obj.predicted_bbox if obj.last_update_predicted else obj.bbox_history[-1]
+            box = self._to_int_bbox(latest_box)
             if box is None:
                 continue
             class_counts[obj.cls_id] = class_counts.get(obj.cls_id, 0) + 1
@@ -94,15 +95,3 @@ class EventVisualizer:
         if len(vals) != 4:
             return None
         return vals
-
-    @staticmethod
-    def _visible_objects(memory_manager):
-        """Chỉ lấy object đang còn bám dấu; object mất dấu sẽ không được vẽ ở frame mới."""
-        visible = {}
-        for t_id, obj in memory_manager.objects.items():
-            if len(obj.bbox_history) == 0:
-                continue
-            if obj.missed_frames >= config.DETECTION_INTERVAL:
-                continue
-            visible[t_id] = obj
-        return visible

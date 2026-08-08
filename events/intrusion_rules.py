@@ -11,6 +11,10 @@ class IntrusionRules:
         if obj.cls_id != 0:  # Chỉ xét Person (Class 0)
             return events
 
+        # Không tính dwell trên frame dự đoán (vị trí chưa phải thật) -> tránh alert sớm
+        if obj.last_update_predicted:
+            return events
+
         curr_center = obj.center_history[-1]
 
         for zone in roi_zones:
