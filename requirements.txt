@@ -1,0 +1,7 @@
+ultralytics==8.4.116
+opencv-python==5.0.0.93
+paho-mqtt==2.1.0
+numpy==2.5.1
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.13.0+cpu
+torchvision==0.28.0+cpu
