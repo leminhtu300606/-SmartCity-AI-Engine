@@ -9,8 +9,21 @@ class TrackedObjectState:
         self.bbox_history = deque(maxlen=max_history)    # [x1, y1, x2, y2]
         self.center_history = deque(maxlen=max_history)  # (cx, cy)
         self.pose_history = deque(maxlen=max_history)    # Keypoints (17, 3)
-        self.velocity_history = deque(maxlen=max_history)# (vx, vy)
-        self.dwell_time = 0                              # Số frame ở trong vùng cấm
+        self.velocity_history = deque(maxlen=max_history)  # (vx, vy)
+        self.dwell_time = 0                              # Tổng frame tích lũy trong mọi vùng cấm
+        self.dwell_times = {}                            # zone_name -> số frame trong vùng đó
+
+    def tick_dwell(self, zone_name, inside):
+        """Cập nhật dwell time theo từng vùng cấm. Tổng = max dwell của các vùng."""
+        if zone_name is None:
+            return
+        prev = self.dwell_times.get(zone_name, 0)
+        value = prev + 1 if inside else max(0, prev - 1)
+        if value <= 0:
+            self.dwell_times.pop(zone_name, None)
+        else:
+            self.dwell_times[zone_name] = value
+        self.dwell_time = max(self.dwell_times.values(), default=0)
 
     def update(self, bbox, keypoints=None, dt=0.04):
         cx = (bbox[0] + bbox[2]) / 2.0
@@ -30,7 +43,7 @@ class TrackedObjectState:
 
 class TemporalMemoryManager:
     def __init__(self, max_history=30):
-        self.objects = {} # track_id -> TrackedObjectState
+        self.objects = {}  # track_id -> TrackedObjectState
         self.max_history = max_history
 
     def update_tracks(self, boxes, poses_dict=None, dt=0.04):
@@ -49,13 +62,13 @@ class TemporalMemoryManager:
         for idx, t_id in enumerate(track_ids):
             t_id = int(t_id)
             cls_id = int(cls_ids[idx])
-            bbox = xyxys[idx] # [x1, y1, x2, y2]
+            bbox = xyxys[idx]  # [x1, y1, x2, y2]
 
             kpts = poses_dict.get(t_id, None) if poses_dict else None
 
             if t_id not in self.objects:
                 self.objects[t_id] = TrackedObjectState(t_id, cls_id, self.max_history)
-            
+
             self.objects[t_id].update(bbox, kpts, dt)
             active_ids.add(t_id)
 

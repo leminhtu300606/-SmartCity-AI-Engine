@@ -45,15 +45,32 @@ Phase 1 hỗ trợ 4 nhóm sự kiện:
 ## Cấu trúc thư mục
 
 ```
-├── main.py              # Pipeline chính, vòng lặp xử lý + hiển thị
-├── config.py            # Toàn bộ cấu hình (stream, model, MQTT, ngưỡng event, ROI)
-├── stream_reader.py     # Đọc stream bằng thread riêng, giữ buffer ngắn
-├── temporal_memory.py   # Lưu history ngắn của từng tracked object
-├── event_classifier.py  # Rule-based classifier cho 4 nhóm event
-├── mqtt_publisher.py    # Xuất cảnh báo MQTT JSON (kèm cooldown)
-├── yolov8n.pt           # Detector
-└── yolov8n-pose.pt      # Model pose (fall / wrist speed)
-```
+├── main.py                  # Entry point: khởi tạo model, pipeline, vòng lặp hiển thị
+├── config.py                # Toàn bộ cấu hình (stream, model, MQTT, ngưỡng event, ROI)
+├── requirements.txt         # Các dependency chính
+│
+├── core/                    # Pipeline xử lý chính
+│   ├── frame_reader.py      #   Đọc stream bằng thread riêng, giữ buffer ngắn
+│   ├── pipeline.py          #   CameraPipelineWorker: detect → track → pose → event
+│   └── visualizer.py        #   Vẽ ROI, bbox, alerts, FPS lên frame
+│
+├── tracking/                # Theo dõi & temporal state
+│   └── temporal_memory.py   #   TrackedObjectState + TemporalMemoryManager (history ngắn)
+│
+├── events/                  # Rule-based event classifier (tách theo nhóm sự kiện)
+│   ├── classifier.py        #   RuleBasedEventClassifier: điều phối các nhóm rule
+│   ├── person_rules.py      #   Fall + Conflict (xô xát/đánh nhau)
+│   ├── vehicle_rules.py     #   Vehicle accident (va chạm giao thông)
+│   └── intrusion_rules.py   #   Xâm nhập vùng cấm (ROI + dwell time)
+│
+├── output/                  # Xuất cảnh báo
+│   └── mqtt_publisher.py    #   Push JSON qua MQTT kèm cooldown
+│
+├── weights/                 # Model files
+│   ├── yolov8n.pt           #   Detector
+│   └── yolov8n-pose.pt      #   Model pose (fall / wrist speed)
+│
+└── venv/                    # Python environment
 
 ## Cài đặt
 
@@ -73,9 +90,12 @@ CAMERA_STREAMS = {
     "cam09": "https://.../index.m3u8",
 }
 
-# Vùng cấm (polygon tọa độ) cho từng camera
+# Vùng cấm (nhiều zone/camera, mỗi zone có tên)
 RESTRICTED_ROIS = {
-    "cam09": [[100, 100], [400, 100], [400, 400], [100, 400]],
+    "cam09": [
+        {"name": "ZONE_1", "polygon": [[100, 100], [400, 100], [400, 400], [100, 400]]},
+        {"name": "ZONE_2", "polygon": [[450, 50], [600, 50], [600, 300], [450, 300]]},
+    ],
 }
 
 # MQTT
