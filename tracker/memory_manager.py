@@ -19,14 +19,26 @@ class ObjectMemoryManager:
             bbox = trk["bbox"]
             cls_id = trk["cls_id"]
             pose = trk.get("pose", None)
+            is_predicted = trk.get("predicted", False)
 
             if t_id not in self.objects:
                 self.objects[t_id] = TrackedObjectState(t_id, cls_id, maxlen=self.maxlen)
 
             obj = self.objects[t_id]
             obj.update(bbox, timestamp, pose)
-            obj.last_updated_frame = frame_idx
+
+            if is_predicted:
+                # Track dự đoán: không được gia hạn thời gian sống, đếm là bị mất dấu
+                obj.missed_frames += 1
+            else:
+                obj.missed_frames = 0
+                obj.last_updated_frame = frame_idx
             updated_ids.add(t_id)
+
+        # Tăng missed_frames cho object không xuất hiện trong frame này
+        for t_id, obj in self.objects.items():
+            if t_id not in updated_ids:
+                obj.missed_frames += 1
 
         # Cleanup lost objects
         dead_ids = [

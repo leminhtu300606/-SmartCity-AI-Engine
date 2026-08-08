@@ -20,6 +20,7 @@ class TrackedObjectState:
 
         self.dwell_times = {}  # {zone_name: frame_count}
         self.last_updated_frame = 0
+        self.missed_frames = 0  # Số frame liên tiếp không được detect thật (để dọn dấu cũ)
 
     def update(self, bbox, timestamp, pose=None):
         cx = (bbox[0] + bbox[2]) / 2.0

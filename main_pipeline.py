@@ -60,7 +60,7 @@ class CameraWorker(threading.Thread):
                 desc = ", ".join(f"{self.cls_names.get(k, k)} x{v}" for k, v in counts.items()) or "none"
                 print(f"[{self.camera_id}] frame {frame_idx}: detected {desc}")
             else:
-                active_tracks = self._predict_tracks(timestamp)
+                active_tracks = self._predict_tracks(timestamp, frame_idx)
 
             # Step 3: Update History Memory
             self.memory_mgr.update_tracks(active_tracks, frame_idx, timestamp)
@@ -107,11 +107,17 @@ class CameraWorker(threading.Thread):
             if key not in current_keys:
                 self.active_alert_keys.discard(key)
 
-    def _predict_tracks(self, timestamp):
-        """Tracking ở frame giữa: dùng vận tốc gần nhất để dự đoán bbox tiếp theo."""
+    def _predict_tracks(self, timestamp, frame_idx):
+        """Tracking ở frame giữa: dự đoán bbox theo vận tốc.
+
+        Chỉ dự đoán object được detect thật gần đây (missed_frames nhỏ).
+        Object đã mất dấu sẽ ngừng vẽ -> đánh dấu cũ được xoá khi sang frame mới.
+        """
         tracks = []
         for t_id, obj in self.memory_mgr.objects.items():
             if len(obj.bbox_history) == 0 or len(obj.velocity_history) == 0:
+                continue
+            if obj.missed_frames >= config.DETECTION_INTERVAL:
                 continue
             dt = max(timestamp - obj.time_history[-1], 1e-5)
             vel = obj.velocity_history[-1]
@@ -126,6 +132,7 @@ class CameraWorker(threading.Thread):
                 "bbox": pred.tolist(),
                 "conf": 0.0,
                 "pose": obj.pose_history[-1] if obj.pose_history else None,
+                "predicted": True,
             })
         return tracks
 
