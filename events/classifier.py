@@ -125,11 +125,12 @@ class RuleBasedEventClassifier:
 
                     # Logic 2: Vehicle collision
                     if oA.cls_id in [2, 3, 5, 7] or oB.cls_id in [2, 3, 5, 7]:
-                        if self.vehicle_rules.check_collision(oA, oB):
+                        is_collision, c_score = self.vehicle_rules.check_collision(oA, oB)
+                        if is_collision:
                             candidates.append({
                                 "event_type": "VEHICLE_COLLISION",
                                 "track_ids": [oA.track_id, oB.track_id],
-                                "confidence": 0.92,
+                                "confidence": min(0.98, 0.75 + c_score * 0.25),
                                 "description":
                                     "Phát hiện va chạm phương tiện/vật thể",
                             })

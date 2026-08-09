@@ -7,12 +7,12 @@ Hệ thống giám sát thông minh đô thị: nhận diện sự kiện từ *
 - **4 logic phát hiện sự kiện (Rule-based + Temporal Confirm):**
   - `HUMAN_ACTION` — người ngã (`HUMAN_FALL`), xô xát (`HUMAN_CONFLICT`), va chạm người (`PERSON_COLLISION`)
   - `VEHICLE_ACCIDENT` — va chạm (`VEHICLE_COLLISION`), dừng bất thường (`VEHICLE_STOP_ANOMALY`)
-  - `SMOKE_FIRE` — cháy (`FIRE_DETECTED`), khói (`SMOKE_DETECTED`) bằng phân tích màu HSV + persistence + region growth
+  - `SMOKE_FIRE` — cháy (`FIRE_DETECTED`), khói (`SMOKE_DETECTED`): phân tích màu HSV + tương phản sáng trên nền tối + tần số nhấp nháy lửa + độ mờ/lan tỏa khói + khói giai đoạn đầu + persistence
   - `INTRUSION` — xâm nhập vùng cấm (`RESTRICTED_INTRUSION`) bằng điểm trong polygon + thời gian lưu lại (dwell)
 - **Detector YOLOv8 + ByteTrack + Pose keypoints** (17 điểm) để phân tích hành vi.
 - **Tracking dự đoán (constant velocity)** giữa các frame detect nhằm giảm tải CPU; chỉ detection thật mới ghi lịch sử kinematics để tránh cảnh báo sai thời điểm.
 - **Cảnh báo cảm biến MQTT** (bất thường điện áp / quá tải) hiển thị chung với alert AI.
-- Chạy **1 nguồn mỗi lần** (single camera hoặc video local), report riêng cho từng nguồn để không trộn lẫn dữ liệu.
+- Chạy **1 nguồn mỗi lần** (single camera hoặc video local).
 - Hiển thị ROI, bounding box, HUD đếm object và banner cảnh báo trên video.
 
 ## Cấu trúc dự án
@@ -20,7 +20,7 @@ Hệ thống giám sát thông minh đô thị: nhận diện sự kiện từ *
 ```
 smartcity_prototype/
 ├── config.py               # Cấu hình stream, model, ROI, ngưỡng sự kiện
-├── main_pipeline.py        # Pipeline chính (CameraWorker, vòng lặp xử lý)
+├── main.py                 # Pipeline chính (CameraWorker, vòng lặp xử lý)
 ├── detector.py             # YOLO detect + ByteTrack + pose
 ├── tracker/                # Quản lý bộ nhớ object (memory_manager, object_state)
 ├── events/                 # Các rule phát hiện + confirm + visualizer
@@ -79,26 +79,23 @@ python -c "from ultralytics import YOLO; YOLO('yolov8n.pt'); YOLO('yolov8n-pose.
 
 ## Chạy
 
-Chạy **riêng từng camera/video** (mỗi lần 1 nguồn, report tách riêng — không trộn kết quả 2 camera vào chung 1 file):
+Chạy **riêng từng camera/video** (mỗi lần 1 nguồn), hiển thị trực tiếp trên cửa sổ OpenCV:
 
 ```bash
-# Chạy stream HLS của 1 camera -> report_cam09.html
-python main_pipeline.py cam09
+# Chạy stream HLS của 1 camera
+python main.py cam09
 
-# Chạy camera khác -> report_cam10.html
-python main_pipeline.py cam10
+# Chạy camera khác
+python main.py cam10
 
-# Phân tích 1 video local (vẫn áp dụng ROI/rule của cam09) -> report_cam09.html
-python main_pipeline.py cam09 --video path/to/video.mp4
-
-# Tuỳ chọn đường dẫn report riêng
-python main_pipeline.py cam09 --report my_report.html
+# Phân tích 1 video local (vẫn áp dụng ROI/rule của cam09)
+python main.py cam09 --video path/to/video.mp4
 
 # Xem danh sách camera / hướng dẫn
-python main_pipeline.py
+python main.py
 ```
 
-- Mỗi lần chạy chỉ xử lý **1 nguồn** duy nhất, kết quả ghi vào report riêng của nguồn đó.
+- Mỗi lần chạy chỉ xử lý **1 nguồn** duy nhất, hiển thị ROI, bounding box, HUD đếm object và banner cảnh báo trực tiếp trên video.
 - Nhấn `q` để thoát, `Ctrl+C` để dừng. Với video local, pipeline tự dừng khi hết video.
 
 ## Cấu hình chính (`config.py`)

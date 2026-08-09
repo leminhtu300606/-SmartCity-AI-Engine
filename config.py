@@ -47,16 +47,8 @@ def _resolve_polygon(polygon):
 
 CAMERA_ROIS = {
     "cam09": [
-        {
-            "name": "Restricted_Zone_09_A",
-            "event_type": EVENT_TYPE_INTRUSION,
-            "polygon": [[50, 50], [300, 50], [300, 300], [50, 300]],
-        },
-        {
-            "name": "Restricted_Zone_09_B",
-            "event_type": EVENT_TYPE_INTRUSION,
-            "polygon": [[360, 40], [620, 40], [620, 220], [360, 220]],
-        },
+        # cam09 tập trung nhận diện HÀNH VI CON NGƯỜI (ngã, xô xát, va chạm)
+        # thay vì vùng cấm không gian (restricted zone đã bỏ).
         {
             "name": "Fire_Risk_Zone_09",
             "event_type": EVENT_TYPE_SMOKE_FIRE,
@@ -122,14 +114,29 @@ PERSON_APPROACH_DIST_THRESH = 0.5    # Khoảng cách tương đối
 PERSON_APPROACH_SPEED_THRESH = 35.0  # Tốc độ tiến gần nhau (px/s)
 
 # ============================================================
-# VEHICLE COLLISION — Normalized + Multi-Signal
+# VEHICLE COLLISION — Accident Classifier (Multi-Feature)
+# Không chỉ dựa vào bbox overlap: xe chạy sát nhau / bị che khuất
+# cũng tạo overlap giả. Kết hợp nhiều đặc trưng quỹ đạo.
 # ============================================================
-VEHICLE_PROXIMITY_DIST_RATIO = 0.4   # Dist / avg_diagonal < threshold = gần nhau
-VEHICLE_IOU_THRESH = 0.08            # IoU overlap threshold
-VEHICLE_DECEL_THRESH = 80.0          # Giảm tốc đột ngột (px/s²)
-VEHICLE_DIR_CHANGE_THRESH = 0.8      # Đổi hướng đột ngột (radians)
-VEHICLE_CLOSING_SPEED_THRESH = 25.0  # Tốc độ tiến lại gần nhau
-VEHICLE_COLLISION_SUSTAINED = 3      # Sustained proximity + anomaly frames
+VEHICLE_PROXIMITY_DIST_RATIO = 0.55  # Dist / avg_diagonal < threshold = gần nhau (nhạy hơn)
+VEHICLE_IOU_THRESH = 0.05            # IoU overlap threshold (nhạy hơn)
+VEHICLE_DECEL_THRESH = 60.0          # Giảm tốc đột ngột (px/s²)
+VEHICLE_DIR_CHANGE_THRESH = 0.6      # Đổi hướng đột ngột (radians)
+VEHICLE_CLOSING_SPEED_THRESH = 18.0  # Tốc độ tiến lại gần nhau
+VEHICLE_COLLISION_SUSTAINED = 2      # Sustained proximity + anomaly frames
+
+# Accident Classifier: điểm tổng hợp từ nhiều đặc trưng
+VEHICLE_DIST_DROP_THRESH = 7.0       # Khoảng cách giảm nhanh giữa 2 frame (px)
+VEHICLE_COLLISION_SCORE_THRESH = 0.42  # Điểm tai nạn tối thiểu (0..1)
+VEHICLE_POST_CONTACT_WINDOW = 8      # Số frame sau tiếp xúc để check hậu va chạm
+VEHICLE_COLLISION_WEIGHTS = {
+    "proximity": 0.30,   # 2 xe tiến rất gần / bbox giao nhau (gate bắt buộc)
+    "closing": 0.15,     # Khoảng cách giảm nhanh (closing velocity)
+    "dist_drop": 0.15,   # Khoảng cách tụt nhanh frame-to-frame
+    "direction": 0.15,   # Đổi hướng / chuyển động đột ngột
+    "decel": 0.10,       # Giảm tốc đột ngột
+    "post_contact": 0.15 # Dừng/đổi hướng bất thường ngay sau tiếp xúc
+}
 
 # ============================================================
 # VEHICLE HARD STOP
@@ -148,11 +155,32 @@ INTRUSION_DEPTH_RATIO = 0.15         # Phải vào sâu >= 15% chiều cao ngư�
 
 # ============================================================
 # SMOKE / FIRE — Morphological + Contour + Flicker + Frame Diff
+# Độ nhạy tăng: ngưỡng thấp hơn → phát hiện sớm hơn (có thể nhạy hơn với nhiễu)
 # ============================================================
-SMOKE_FIRE_MIN_CONTOUR_AREA = 500    # Diện tích contour tối thiểu (px²)
-SMOKE_FIRE_FIRE_PIXEL_THRESH = 400   # Pixel lửa tối thiểu (was 150)
-SMOKE_FIRE_SMOKE_PIXEL_THRESH = 800  # Pixel khói tối thiểu (was 300)
-SMOKE_FIRE_FIRE_PERSIST_THRESH = 7   # Persistence frames cho lửa (was 5)
-SMOKE_FIRE_SMOKE_PERSIST_THRESH = 12 # Persistence frames cho khói (was 8)
-SMOKE_FIRE_FLICKER_THRESH = 0.12     # Tỷ lệ thay đổi frame-to-frame cho flicker
+SMOKE_FIRE_MIN_CONTOUR_AREA = 300    # Diện tích contour tối thiểu (px²)
+SMOKE_FIRE_FIRE_PIXEL_THRESH = 250   # Pixel lửa tối thiểu (was 400)
+SMOKE_FIRE_SMOKE_PIXEL_THRESH = 500  # Pixel khói tối thiểu (was 800)
+SMOKE_FIRE_FIRE_PERSIST_THRESH = 5   # Persistence frames cho lửa (was 7)
+SMOKE_FIRE_SMOKE_PERSIST_THRESH = 8  # Persistence frames cho khói (was 12)
+SMOKE_FIRE_FLICKER_THRESH = 0.08     # Tỷ lệ thay đổi frame-to-frame cho flicker
 SMOKE_FIRE_GROWTH_WINDOW = 5         # Cửa sổ phân tích region growth (was 4)
+
+# Fire: độ sáng tương phản cao so với nền tối + tần số nhấp nháy đặc thù lửa thật
+SMOKE_FIRE_CONTRAST_THRESH = 40.0          # Chênh lệch mean(V) giữa lửa và nền xung quanh
+SMOKE_FIRE_FLICKER_FREQ_THRESH = 0.25      # Tần số dao động nhấp nháy lửa (0..1, lửa thật cao)
+SMOKE_FIRE_FLICKER_FREQ_WINDOW = 10        # Cửa sổ mẫu để tính tần số flicker
+
+# Fire: phân loại đối tượng (lửa thật vs vật thể màu tương tự: đèn, mây...)
+SMOKE_FIRE_FIRE_EDGE_IRREGULARITY_THRESH = 1.08  # Cạnh sắc tối thiểu; đèn tròn mượt ≈1.0
+SMOKE_FIRE_FIRE_JAGGED_THRESH = 1.20            # Cạnh răng cưa rõ rệt (ngọn lửa thật)
+SMOKE_FIRE_FIRE_CLASS_SCORE_THRESH = 0.40        # Điểm phân loại lửa tối thiểu (0..1)
+
+# Smoke: dạng mây mờ lan tỏa, đổi hình dạng + độ trong suốt theo thời gian
+SMOKE_FIRE_SMOKE_SOFT_GRAD_THRESH = 50.0   # Gradient nội tại < ngưỡng = pixel khói mờ (px)
+SMOKE_FIRE_SMOKE_SOFTNESS_THRESH = 0.40    # Tỷ lệ pixel mờ tối thiểu trong vùng khói
+SMOKE_FIRE_SMOKE_SHAPE_CHANGE_THRESH = 0.18  # Tỷ lệ hình dạng khói thay đổi giữa 2 frame
+SMOKE_FIRE_SMOKE_CHANGE_THRESH = 0.015     # Frame diff tối thiểu cho tín hiệu khói
+
+# Khói giai đoạn đầu: phát hiện sớm trước khi thấy rõ ngọn lửa -> tăng thời gian phản ứng
+SMOKE_FIRE_EARLY_SMOKE_PIXEL_THRESH = 250  # Pixel tối thiểu cho khói giai đoạn đầu
+SMOKE_FIRE_EARLY_SMOKE_PERSIST_THRESH = 3  # Persistence khói sớm (thấp hơn -> confirm nhanh hơn)
