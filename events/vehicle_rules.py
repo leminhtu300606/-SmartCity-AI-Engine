@@ -110,8 +110,14 @@ class VehicleAccidentRules:
             + w["post_contact"] * post_contact_score
         )
 
-        # Gate bắt buộc: phải gần nhau (proximity là điều kiện cần)
-        is_proximate_candidate = is_proximate and score > config.VEHICLE_COLLISION_SCORE_THRESH
+        # Gate bắt buộc: phải gần nhau (proximity là điều kiện cần) + phải có
+        # TÍN HIỆU ĐỘNG HỌC thật. Xe đậu sát nhau / đi song song (closing≈0,
+        # decel≈0) → KHÔNG phải va chạm dù bbox rất gần.
+        kinetic_signal = max(closing_score, decel_score)
+        has_kinetic = kinetic_signal > config.VEHICLE_COLLISION_MIN_KINETIC
+
+        is_proximate_candidate = (is_proximate and has_kinetic
+                                  and score > config.VEHICLE_COLLISION_SCORE_THRESH)
 
         # Cho phép "hậu va chạm": ngay sau thời điểm tiếp xúc, xe bị hất lệch
         # (đổi hướng đột ngột) hoặc dừng bất thường dù 2 xe đã bắt đầu tách xa.
@@ -125,14 +131,19 @@ class VehicleAccidentRules:
         is_candidate = is_proximate_candidate or post_contact_only
 
         # Temporal sustained confirmation (tránh spike 1 frame)
+        # Cap counter tại SUSTAINED + 2 để cảnh báo tắt nhanh khi hết hiện tượng.
         if is_candidate:
-            self.collision_state[pair_key] = self.collision_state.get(pair_key, 0) + 1
+            self.collision_state[pair_key] = min(
+                config.VEHICLE_COLLISION_SUSTAINED + 2,
+                self.collision_state.get(pair_key, 0) + 1,
+            )
         else:
             self.collision_state[pair_key] = max(
                 0, self.collision_state.get(pair_key, 0) - 1
             )
 
-        is_confirmed = (self.collision_state.get(pair_key, 0)
+        is_confirmed = (is_candidate
+                        and self.collision_state.get(pair_key, 0)
                         >= config.VEHICLE_COLLISION_SUSTAINED)
         return is_confirmed, score
 
@@ -165,13 +176,19 @@ class VehicleAccidentRules:
         is_candidate = is_stopped and has_sharp_decel
 
         # Sustained confirmation
+        # Cap counter tại SUSTAINED + 2 để cảnh báo tắt nhanh khi xe chạy lại.
         tid = obj.track_id
         if is_candidate:
-            self.hard_stop_state[tid] = self.hard_stop_state.get(tid, 0) + 1
+            self.hard_stop_state[tid] = min(
+                config.VEHICLE_HARD_STOP_SUSTAINED + 2,
+                self.hard_stop_state.get(tid, 0) + 1,
+            )
         else:
             self.hard_stop_state[tid] = max(0, self.hard_stop_state.get(tid, 0) - 1)
 
-        return self.hard_stop_state.get(tid, 0) >= config.VEHICLE_HARD_STOP_SUSTAINED
+        return (is_candidate
+                and self.hard_stop_state.get(tid, 0)
+                >= config.VEHICLE_HARD_STOP_SUSTAINED)
 
     # ----------------------------------------------------------------
     # Helper Methods

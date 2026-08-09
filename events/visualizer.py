@@ -50,9 +50,45 @@ class EventVisualizer:
         cv2.putText(canvas, f"{camera_id} | {hud}", (10, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1)
 
+        # 2b. Vẽ lưới ô nhỏ (grid) cho phát hiện khói/lửa theo từng điểm
+        if config.SMOKE_FIRE_GRID_ENABLED:
+            h, w = canvas.shape[:2]
+            step_x = w / config.SMOKE_FIRE_GRID_COLS
+            step_y = h / config.SMOKE_FIRE_GRID_ROWS
+            grid_color = (100, 100, 100)
+            for i in range(1, config.SMOKE_FIRE_GRID_COLS):
+                x = int(round(i * step_x))
+                cv2.line(canvas, (x, 0), (x, h), grid_color, 1)
+            for j in range(1, config.SMOKE_FIRE_GRID_ROWS):
+                y = int(round(j * step_y))
+                cv2.line(canvas, (0, y), (w, y), grid_color, 1)
+
         # 3. Gom chung AI Events & Sensor Alerts (dedup: chỉ giữ 1 cảnh báo mỗi loại)
         all_alerts = []
         seen_types = set()
+
+        # 3b. Vẽ bbox VỊ TRÍ nghi vấn lên khung hình (trước khi dedup banner)
+        #     Lửa/khói theo ô: bbox = ô grid. Đánh nhau/va chạm: bbox = vùng 2 đối tượng.
+        for ev in list(active_events):
+            box = self._to_int_bbox(ev.get("bbox"))
+            if box is not None:
+                if ev["event_type"] in ("FIRE_DETECTED", "SMOKE_DETECTED"):
+                    color = (0, 0, 255)  # đỏ cho lửa/khói
+                elif ev["event_type"] == "HUMAN_CONFLICT":
+                    color = (0, 0, 255)
+                else:
+                    color = (0, 165, 255)  # cam cho va chạm/ngã/xâm nhập
+                cv2.rectangle(canvas, (box[0], box[1]), (box[2], box[3]), color, 2)
+                cv2.putText(
+                    canvas,
+                    ev["event_type"],
+                    (box[0], box[1] - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    color,
+                    1,
+                )
+
         for ev in list(active_events):
             if ev.get("event_type") not in seen_types:
                 seen_types.add(ev.get("event_type"))

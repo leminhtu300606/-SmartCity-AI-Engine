@@ -68,11 +68,19 @@ class PersonActionRules:
         return obj.fall_persist_count >= config.FALL_PERSIST_FRAMES
 
     def check_conflict(self, objA, objB):
-        """Phát hiện 2 người xô xát/giằng co/đánh nhau.
+        """Phát hiện 2 người xô xát/giằng co/đánh nhau — bộ quyết định 2 đường.
 
-        Sử dụng pose-based wrist speed + bbox-based jitter + distance variance.
-        Khi pose unavailable, tự động fallback sang bbox jitter.
-        Phải duy trì tín hiệu xung đột >= CONFLICT_SUSTAINED_FRAMES.
+        KHÔNG coi "nhiều người trong khung hình" là đánh nhau. Phải có HÀNH VI
+        thật sự:
+          - Đám đông đứng nói chuyện / đi chung: gần nhau NHƯNG không ai vung
+            tay nhanh và không ai cử động giật cục mạnh → loại.
+          - Một người chạy ngang / vẫy tay gần người khác: chỉ 1 người động,
+            người kia không phản ứng, khoảng cách ổn định → loại.
+
+        ĐƯỜNG A (Pose): 1 người vung cổ tay RẤT nhanh (đấm/đánh) + gần nhau +
+        (người kia cũng động HOẶC khoảng cách dao động).
+        ĐƯỜNG B (BBox fallback): CẢ HAI đều cử động giật cục mạnh VÀ khoảng
+        cách dao động mạnh (giằng co lúc gần lúc xa).
         """
         if len(objA.bbox_history) < 5 or len(objB.bbox_history) < 5:
             return False, 0.0
@@ -87,24 +95,34 @@ class PersonActionRules:
         pair_key = (min(objA.track_id, objB.track_id),
                     max(objA.track_id, objB.track_id))
 
-        # Phải ở gần nhau (proximity check)
+        # ============================================================
+        # GATE: gần nhau (proximity)
+        # Người đi chung đường cũng có thể gần nhau → chưa đủ, chỉ là gate.
+        # ============================================================
         if dist > config.CONFLICT_DIST_THRESH:
             self.conflict_state[pair_key] = max(
                 0, self.conflict_state.get(pair_key, 0) - 1
             )
             return False, 0.0
 
-        # Score 1: Wrist speed (pose-based)
-        wrist_speed_A = self._get_wrist_speed(objA)
-        wrist_speed_B = self._get_wrist_speed(objB)
-        kinetic_score = wrist_speed_A + wrist_speed_B
-
-        # Score 2: BBox center jitter (fallback khi pose unavailable hoặc kém)
+        # ============================================================
+        # ĐẶC TRƯNG: cử động của TỪNG người
+        # ============================================================
+        wrist_A = self._get_wrist_speed(objA)
+        wrist_B = self._get_wrist_speed(objB)
         jitter_A = self._get_bbox_jitter(objA)
         jitter_B = self._get_bbox_jitter(objB)
-        jitter_score = (jitter_A + jitter_B) * 2.0
 
-        # Score 3: Distance variance (giằng co — khoảng cách lúc gần lúc xa)
+        # Độ kích động của mỗi người = max(wrist speed, bbox jitter)
+        agitation_A = max(wrist_A, jitter_A)
+        agitation_B = max(wrist_B, jitter_B)
+        mutual_agitation = min(agitation_A, agitation_B)
+
+        # ============================================================
+        # ĐẶC TRƯNG: khoảng cách dao động (giằng co)
+        # Trong đánh nhau, 2 người lúc áp sát lúc tách xa → phương sai khoảng
+        # cách lớn. Nói chuyện/đứng yên/đi chung → khoảng cách ổn định.
+        # ============================================================
         window = min(8, min(len(objA.center_history), len(objB.center_history)))
         dists = [
             np.linalg.norm(np.array(cA) - np.array(cB)) / avg_h
@@ -115,26 +133,52 @@ class PersonActionRules:
         ]
         dist_variance = np.var(dists) if len(dists) > 1 else 0.0
 
-        # Combine scores: ưu tiên pose nếu có, fallback bbox jitter
-        if kinetic_score > 5.0:
-            conflict_score = (kinetic_score * 0.5
-                              + dist_variance * 40.0 * 0.3
-                              + jitter_score * 0.2)
-        else:
-            conflict_score = (jitter_score * 0.6
-                              + dist_variance * 40.0 * 0.4)
+        # ============================================================
+        # QUYẾT ĐỊNH 2 ĐƯỜNG
+        # ============================================================
+        # Đường A — Pose: có người vung cổ tay nhanh (đấm/đánh)
+        pose_punch = (max(wrist_A, wrist_B) > config.CONFLICT_WRIST_HIGH_THRESH)
 
-        is_candidate = conflict_score > config.CONFLICT_KINETIC_THRESH
+        # Đường B — BBox: CẢ HAI người cử động giật cục rất mạnh.
+        # Jitter cao (>= 12) chỉ đạt khi thực sự giằng co/đánh nhau; người đi
+        # lại bình thường chỉ ~7. Giằng co sát nhau có khoảng cách ổn định
+        # nên không dùng oscillation làm điều kiện bắt buộc.
+        both_jittery = (min(jitter_A, jitter_B)
+                        > config.CONFLICT_BBOX_JITTER_THRESH)
+
+        # Tương tác: người kia cũng động hoặc khoảng cách dao động mạnh
+        signal_mutual = mutual_agitation > config.CONFLICT_MUTUAL_AGITATION_THRESH
+        signal_oscillation = dist_variance > config.CONFLICT_DIST_VAR_THRESH
+
+        # Đường A: vung tay + có tương tác
+        path_pose = pose_punch and (signal_mutual or signal_oscillation)
+
+        # Đường B: cả 2 giật mạnh + có tương tác (đôi công / giằng co sát nhau)
+        path_bbox = both_jittery and (signal_mutual or signal_oscillation)
+
+        is_candidate = path_pose or path_bbox
+
+        # Điểm kết hợp (chỉ để tính confidence)
+        conflict_score = (max(wrist_A, wrist_B) * 0.4
+                          + (jitter_A + jitter_B) * 0.2
+                          + dist_variance * 40.0 * 0.3
+                          + mutual_agitation * 0.1)
 
         # Temporal sustained confirmation
+        # Cap counter tại SUSTAINED + 2: khi hiện tượng dừng, chỉ cần decay
+        # 2-3 frame là dưới ngưỡng → cảnh báo tắt ngay, không treo lâu.
         if is_candidate:
-            self.conflict_state[pair_key] = self.conflict_state.get(pair_key, 0) + 1
+            self.conflict_state[pair_key] = min(
+                config.CONFLICT_SUSTAINED_FRAMES + 2,
+                self.conflict_state.get(pair_key, 0) + 1,
+            )
         else:
             self.conflict_state[pair_key] = max(
                 0, self.conflict_state.get(pair_key, 0) - 1
             )
 
-        is_confirmed = (self.conflict_state.get(pair_key, 0)
+        is_confirmed = (is_candidate
+                        and self.conflict_state.get(pair_key, 0)
                         >= config.CONFLICT_SUSTAINED_FRAMES)
         return is_confirmed, conflict_score
 

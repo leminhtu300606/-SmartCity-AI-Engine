@@ -101,11 +101,30 @@ FALL_PERSIST_FRAMES = 4              # Phải nằm ngang >= N detection frames 
 
 # ============================================================
 # CONFLICT / FIGHT DETECTION
+# Bộ quyết định 2 đường rõ ràng — KHÔNG coi "nhiều người trong khung hình"
+# là đánh nhau. Phải có HÀNH VI thật:
+#   Đường A (Pose): 1 người vung cổ tay RẤT nhanh (đấm/đánh) + gần nhau +
+#                   (người kia cũng động HOẶC khoảng cách dao động).
+#   Đường B (BBox) : CẢ HAI đều cử động giật cục mạnh VÀ khoảng cách dao
+#                   động mạnh (giằng co lúc gần lúc xa).
+#   Đám đông đứng/đi chung: không đạt điều kiện nào → không báo.
 # ============================================================
 CONFLICT_DIST_THRESH = 1.0           # Khoảng cách tương đối tối đa (by avg height)
-CONFLICT_KINETIC_THRESH = 12.0       # Kinetic score threshold
 CONFLICT_SUSTAINED_FRAMES = 3        # Phải duy trì tín hiệu xung đột >= N frames
-CONFLICT_BBOX_JITTER_THRESH = 8.0    # BBox center jitter fallback (khi không có pose)
+
+# Đường A (Pose): tốc độ cổ tay tối thiểu = "vung tay đấm" (px/s)
+CONFLICT_WRIST_HIGH_THRESH = 20.0
+# Mức kích động tối thiểu của người thứ 2 khi có người vung tay (đôi công)
+CONFLICT_MUTUAL_AGITATION_THRESH = 5.0
+# Phương sai khoảng cách tối thiểu (theo avg height) → "giằng co"
+CONFLICT_DIST_VAR_THRESH = 0.30
+
+# Đường B (BBox fallback): mỗi người phải jitter RẤT cao mới coi là đánh nhau
+# (cao hơn hẳn việc đi lại/chen lấn thông thường trong đám đông)
+CONFLICT_BBOX_JITTER_THRESH = 12.0   # BBox center jitter fallback (khi không có pose)
+
+# Điểm kết hợp (cho confidence)
+CONFLICT_KINETIC_THRESH = 12.0       # Kinetic score threshold
 
 # ============================================================
 # PERSON COLLISION / APPROACH
@@ -129,6 +148,10 @@ VEHICLE_COLLISION_SUSTAINED = 2      # Sustained proximity + anomaly frames
 VEHICLE_DIST_DROP_THRESH = 7.0       # Khoảng cách giảm nhanh giữa 2 frame (px)
 VEHICLE_COLLISION_SCORE_THRESH = 0.42  # Điểm tai nạn tối thiểu (0..1)
 VEHICLE_POST_CONTACT_WINDOW = 8      # Số frame sau tiếp xúc để check hậu va chạm
+# Chỉ báo va chạm khi có TÍN HIỆU ĐỘNG HỌC thật: xe tiến lại nhanh (closing)
+# HOẶC giảm tốc đột ngột (decel) đạt tối thiểu. Xe đậu sát nhau / đi song song
+# (closing≈0, decel≈0) → không phải va chạm dù bbox rất gần.
+VEHICLE_COLLISION_MIN_KINETIC = 0.20   # Điểm tối thiểu của closing hoặc decel (0..1)
 VEHICLE_COLLISION_WEIGHTS = {
     "proximity": 0.30,   # 2 xe tiến rất gần / bbox giao nhau (gate bắt buộc)
     "closing": 0.15,     # Khoảng cách giảm nhanh (closing velocity)
@@ -157,23 +180,36 @@ INTRUSION_DEPTH_RATIO = 0.15         # Phải vào sâu >= 15% chiều cao ngư�
 # SMOKE / FIRE — Morphological + Contour + Flicker + Frame Diff
 # Độ nhạy tăng: ngưỡng thấp hơn → phát hiện sớm hơn (có thể nhạy hơn với nhiễu)
 # ============================================================
-SMOKE_FIRE_MIN_CONTOUR_AREA = 300    # Diện tích contour tối thiểu (px²)
-SMOKE_FIRE_FIRE_PIXEL_THRESH = 250   # Pixel lửa tối thiểu (was 400)
+SMOKE_FIRE_MIN_CONTOUR_AREA = 250    # Diện tích contour tối thiểu (px²)
+SMOKE_FIRE_FIRE_PIXEL_THRESH = 180   # Pixel lửa tối thiểu (was 250) — bắt lửa nhỏ/xa
 SMOKE_FIRE_SMOKE_PIXEL_THRESH = 500  # Pixel khói tối thiểu (was 800)
-SMOKE_FIRE_FIRE_PERSIST_THRESH = 5   # Persistence frames cho lửa (was 7)
+SMOKE_FIRE_FIRE_PERSIST_THRESH = 4   # Persistence frames cho lửa (was 5)
 SMOKE_FIRE_SMOKE_PERSIST_THRESH = 8  # Persistence frames cho khói (was 12)
-SMOKE_FIRE_FLICKER_THRESH = 0.08     # Tỷ lệ thay đổi frame-to-frame cho flicker
+SMOKE_FIRE_FLICKER_THRESH = 0.06     # Tỷ lệ thay đổi frame-to-frame cho flicker
 SMOKE_FIRE_GROWTH_WINDOW = 5         # Cửa sổ phân tích region growth (was 4)
 
 # Fire: độ sáng tương phản cao so với nền tối + tần số nhấp nháy đặc thù lửa thật
-SMOKE_FIRE_CONTRAST_THRESH = 40.0          # Chênh lệch mean(V) giữa lửa và nền xung quanh
-SMOKE_FIRE_FLICKER_FREQ_THRESH = 0.25      # Tần số dao động nhấp nháy lửa (0..1, lửa thật cao)
+SMOKE_FIRE_CONTRAST_THRESH = 30.0          # Chênh lệch mean(V) giữa lửa và nền xung quanh
+SMOKE_FIRE_FLICKER_FREQ_THRESH = 0.20      # Tần số dao động nhấp nháy lửa (0..1, lửa thật cao)
 SMOKE_FIRE_FLICKER_FREQ_WINDOW = 10        # Cửa sổ mẫu để tính tần số flicker
 
 # Fire: phân loại đối tượng (lửa thật vs vật thể màu tương tự: đèn, mây...)
 SMOKE_FIRE_FIRE_EDGE_IRREGULARITY_THRESH = 1.08  # Cạnh sắc tối thiểu; đèn tròn mượt ≈1.0
 SMOKE_FIRE_FIRE_JAGGED_THRESH = 1.20            # Cạnh răng cưa rõ rệt (ngọn lửa thật)
 SMOKE_FIRE_FIRE_CLASS_SCORE_THRESH = 0.40        # Điểm phân loại lửa tối thiểu (0..1)
+
+# PHÂN BIỆT LỬA vs VẬT ĐỎ (áo quần, xe, biển báo):
+# - Lửa ĐA SẮC: hue trải rộng (vàng → cam → đỏ). Vật đỏ đồng nhất một sắc độ
+#   → circular variance của hue lửa cao, vật đỏ ≈ 0.
+# - Lửa có LÕI SÁNG trắng/vàng nhạt (V cao, S thấp). Vật đỏ bão hòa (S cao)
+#   không có lõi trắng dù rất sáng (đèn xe, đèn pha).
+SMOKE_FIRE_FIRE_HUE_CIRC_VAR_THRESH = 0.05     # Circular variance hue tối thiểu của lửa
+SMOKE_FIRE_FIRE_BRIGHT_CORE_RATIO_THRESH = 0.04  # Tỷ lệ pixel lõi sáng tối thiểu trong vùng
+# Lửa đồng màu (cháy âm ỉ): diện tích dao động mạnh theo thời gian (co/giãn),
+# vật đỏ di chuyển giữ nguyên kích thước → phân biệt không cần lõi/hue.
+SMOKE_FIRE_FIRE_AREA_FLUCT_THRESH = 0.12   # CV (std/mean) diện tích lửa tối thiểu
+SMOKE_FIRE_FIRE_CORE_V_THRESH = 225            # V tối thiểu của lõi sáng
+SMOKE_FIRE_FIRE_CORE_S_MAX = 140               # S tối đa của lõi (vàng nhạt/trắng, không bão hòa)
 
 # Smoke: dạng mây mờ lan tỏa, đổi hình dạng + độ trong suốt theo thời gian
 SMOKE_FIRE_SMOKE_SOFT_GRAD_THRESH = 50.0   # Gradient nội tại < ngưỡng = pixel khói mờ (px)
@@ -184,3 +220,23 @@ SMOKE_FIRE_SMOKE_CHANGE_THRESH = 0.015     # Frame diff tối thiểu cho tín h
 # Khói giai đoạn đầu: phát hiện sớm trước khi thấy rõ ngọn lửa -> tăng thời gian phản ứng
 SMOKE_FIRE_EARLY_SMOKE_PIXEL_THRESH = 250  # Pixel tối thiểu cho khói giai đoạn đầu
 SMOKE_FIRE_EARLY_SMOKE_PERSIST_THRESH = 3  # Persistence khói sớm (thấp hơn -> confirm nhanh hơn)
+
+# ============================================================
+# GRID / TILE DETECTION — Phát hiện nghi vấn theo TỪNG Ô NHỎ trong khung hình
+# Thay vì chỉ phân tích toàn ROI (lửa/khói ở góc nhỏ bị pha loãng, không định
+# vị được vị trí), chia ROI thành lưới ô nhỏ và chạy phân tích độc lập từng ô.
+# Mỗi ô có persistence + zone_name riêng → event kèm bbox vị trí chính xác.
+# ============================================================
+SMOKE_FIRE_GRID_ENABLED = True          # Bật/tắt phát hiện theo ô nhỏ
+SMOKE_FIRE_GRID_COLS = 4                # Số cột lưới (640/4 = 160 px/ô)
+SMOKE_FIRE_GRID_ROWS = 3                # Số hàng lưới (384/3 = 128 px/ô)
+# Ngưỡng pixel tỉ lệ theo diện tích ô (ô nhỏ hơn toàn frame nên cần ngưỡng
+# thấp hơn để bắt được đám cháy/khói cục bộ bên trong một ô).
+SMOKE_FIRE_GRID_FIRE_PIXEL_FACTOR = 0.35    # Nhân với ngưỡng toàn frame (180 → 63 px)
+SMOKE_FIRE_GRID_SMOKE_PIXEL_FACTOR = 0.30   # Nhân với ngưỡng toàn frame (500 → 150 px)
+SMOKE_FIRE_GRID_MIN_CONTOUR_FACTOR = 0.30   # Contour tối thiểu (250 → 75 px²)
+SMOKE_FIRE_GRID_CONTRAST_THRESH = 20.0      # Tương phản tối thiểu trong ô (thấp hơn toàn frame)
+# Diện tích lửa trong ô nhỏ dao động tự nhiên ít hơn toàn frame (ô nhỏ hơn →
+# % thay đổi tuyệt đối nhỏ hơn) → hạ ngưỡng CV để không bỏ lọt lửa cục bộ.
+SMOKE_FIRE_GRID_AREA_FLUCT_THRESH = 0.10    # CV diện tích trong ô (was 0.12)
+SMOKE_FIRE_GRID_JAGGED_THRESH = 1.15        # Cạnh răng cưa trong ô (was 1.20)

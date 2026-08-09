@@ -72,6 +72,7 @@ class RuleBasedEventClassifier:
                         candidates.append({
                             "event_type": "HUMAN_FALL",
                             "track_ids": [obj.track_id],
+                            "bbox": self._get_bbox(obj),
                             "confidence": 0.90,
                             "description": "Phát hiện người bị ngã",
                         })
@@ -83,6 +84,7 @@ class RuleBasedEventClassifier:
                         candidates.append({
                             "event_type": "VEHICLE_STOP_ANOMALY",
                             "track_ids": [obj.track_id],
+                            "bbox": self._get_bbox(obj),
                             "confidence": 0.85,
                             "description":
                                 "Xe tai nạn / dừng bất thường giữa đường",
@@ -105,6 +107,7 @@ class RuleBasedEventClassifier:
                             candidates.append({
                                 "event_type": "HUMAN_CONFLICT",
                                 "track_ids": [oA.track_id, oB.track_id],
+                                "bbox": self._union_bbox(oA, oB),
                                 "confidence": min(1.0, 0.7 + score / 60.0),
                                 "description":
                                     "Phát hiện xô xát/đánh nhau/giằng co",
@@ -118,6 +121,7 @@ class RuleBasedEventClassifier:
                             candidates.append({
                                 "event_type": "PERSON_COLLISION",
                                 "track_ids": [oA.track_id, oB.track_id],
+                                "bbox": self._union_bbox(oA, oB),
                                 "confidence": a_score,
                                 "description":
                                     "Phát hiện 2 người tiếp cận nhanh/va chạm",
@@ -130,6 +134,7 @@ class RuleBasedEventClassifier:
                             candidates.append({
                                 "event_type": "VEHICLE_COLLISION",
                                 "track_ids": [oA.track_id, oB.track_id],
+                                "bbox": self._union_bbox(oA, oB),
                                 "confidence": min(0.98, 0.75 + c_score * 0.25),
                                 "description":
                                     "Phát hiện va chạm phương tiện/vật thể",
@@ -145,3 +150,32 @@ class RuleBasedEventClassifier:
         # decay chỉ chạy trên detection frame (decay=False trên predicted frame)
         # để counter object-based tích lũy đúng nhịp 1:1 với detection thật.
         return self.confirmer.process(candidates, decay=is_detection_frame)
+
+    # ----------------------------------------------------------------
+    # Helpers — lấy bbox vị trí event để hiển thị
+    # ----------------------------------------------------------------
+    @staticmethod
+    def _get_bbox(obj):
+        """Bbox [x1, y1, x2, y2] hiện tại của object; None nếu chưa có."""
+        if len(obj.bbox_history) == 0:
+            return None
+        box = obj.bbox_history[-1]
+        try:
+            return [int(v) for v in box]
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _union_bbox(cls, objA, objB):
+        """Bbox hợp (bao quanh) 2 object — vùng xảy ra sự kiện."""
+        bA, bB = cls._get_bbox(objA), cls._get_bbox(objB)
+        if bA is None:
+            return bB
+        if bB is None:
+            return bA
+        return [
+            min(bA[0], bB[0]),
+            min(bA[1], bB[1]),
+            max(bA[2], bB[2]),
+            max(bA[3], bB[3]),
+        ]
