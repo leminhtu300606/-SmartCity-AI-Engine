@@ -23,14 +23,14 @@ class SmokeFireRules:
     - Nhận biết dạng mây mờ lan tỏa: độ mờ nội tại (softness/transparency) cao,
       hình dạng thay đổi theo thời gian (shape change), area lan tỏa (growth).
     - Frame differencing: phân biệt khói mới xuất hiện vs bề mặt xám có sẵn.
-    - Phát hiện khói GIAI ĐOẠN ĐẦU khi chưa thấy rõ ngọn lửa (ngưỡng pixel thấp
-      hơn + confirm nhanh hơn) → tăng thời gian phản ứng an toàn.
+    - Khói chỉ được xác nhận sau khi đủ persistence frames (SMOKE_PERSIST_THRESH)
+      với đầy đủ điều kiện (đủ pixel + mờ + đổi hình + frame diff) — không có
+      đường xác nhận khói "giai đoạn đầu" riêng với ngưỡng lỏng hơn.
     """
 
     def __init__(self):
         self.fire_persistence_map = {}   # zone -> persistence_count
         self.smoke_persistence_map = {}
-        self.early_smoke_persistence_map = {}  # zone -> persistence cho khói giai đoạn đầu
         self.fire_area_history = {}      # zone -> [fire_pixels, ...] cho region growth
         self.fire_signal_history = {}    # zone -> [bool, ...] cho flicker frequency
         self.prev_fire_mask = {}         # zone -> previous fire mask cho flicker detection
@@ -344,40 +344,8 @@ class SmokeFireRules:
                 0, self.smoke_persistence_map.get(zone_name, 0) - 1
             )
 
-        # KHÓI GIAI ĐOẠN ĐẦU: mờ, lan tỏa, đổi hình khi CHƯA thấy rõ ngọn lửa.
-        # Ngưỡng pixel thấp hơn + confirm nhanh hơn để tăng thời gian phản ứng.
-        is_early_smoke_signal = (
-            smoke_pixels > config.SMOKE_FIRE_EARLY_SMOKE_PIXEL_THRESH
-            and smoke_softness > config.SMOKE_FIRE_SMOKE_SOFTNESS_THRESH
-            and (shape_change > config.SMOKE_FIRE_SMOKE_SHAPE_CHANGE_THRESH
-                 or spread > 0.03)
-            and (smoke_change > config.SMOKE_FIRE_SMOKE_CHANGE_THRESH * 0.5
-                 or smoke_ratio > 0.01)
-        )
-        if is_early_smoke_signal:
-            self.early_smoke_persistence_map[zone_name] = min(
-                config.SMOKE_FIRE_EARLY_SMOKE_PERSIST_THRESH + 2,
-                self.early_smoke_persistence_map.get(zone_name, 0) + 1,
-            )
-        else:
-            self.early_smoke_persistence_map[zone_name] = max(
-                0, self.early_smoke_persistence_map.get(zone_name, 0) - 1
-            )
-
-        # SMOKE EVENT — ưu tiên cảnh báo khói sớm (trước khi thấy lửa)
-        if (self.early_smoke_persistence_map.get(zone_name, 0)
-                >= config.SMOKE_FIRE_EARLY_SMOKE_PERSIST_THRESH):
-            smoke_ev = {
-                "event_type": "SMOKE_DETECTED",
-                "zone_name": zone_name,
-                "confidence": min(0.90, 0.70 + smoke_change * 2
-                                  + smoke_softness * 0.2 + spread * 0.5),
-                "description": f"Phát hiện khói giai đoạn đầu tại ô {zone_name}",
-            }
-            if bbox is not None:
-                smoke_ev["bbox"] = bbox
-            events.append(smoke_ev)
-        elif (self.smoke_persistence_map.get(zone_name, 0)
+        # SMOKE EVENT
+        if (self.smoke_persistence_map.get(zone_name, 0)
                 >= config.SMOKE_FIRE_SMOKE_PERSIST_THRESH):
             smoke_ev = {
                 "event_type": "SMOKE_DETECTED",

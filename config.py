@@ -123,14 +123,36 @@ CONFLICT_DIST_VAR_THRESH = 0.30
 # (cao hơn hẳn việc đi lại/chen lấn thông thường trong đám đông)
 CONFLICT_BBOX_JITTER_THRESH = 12.0   # BBox center jitter fallback (khi không có pose)
 
+# Đường C (Grapple / vật lộn): 2 người dính sát nhau, bbox chồng nhau (IoU cao),
+# giằng co TẠI CHỖ với cường độ vừa phải — thường KHÔNG vung tay đấm (wrist thấp)
+# và KHÔNG dịch chuyển xa (jitter thấp hơn đấm đá) nên 2 đường A/B dễ bỏ lọt.
+# Phân biệt:
+#   - Ôm nhau / đứng nói chuyện sát: IoU cao NHƯNG jitter ≈ 0 → không bắt.
+#   - Đám đông chen lấn: jitter cao NHƯNG ít khi bbox chồng nhau mạnh (IoU thấp).
+CONFLICT_GRAPPLE_IOU_THRESH = 0.20   # Bbox 2 người chồng nhau >= 20%
+CONFLICT_GRAPPLE_DIST_THRESH = 0.5   # Khoảng cách tương đối tối đa khi vật lộn
+CONFLICT_GRAPPLE_MIN_JITTER = 8.0    # Ít nhất 1 người giằng co đáng kể (thấp hơn đường B)
+
 # Điểm kết hợp (cho confidence)
 CONFLICT_KINETIC_THRESH = 12.0       # Kinetic score threshold
 
 # ============================================================
 # PERSON COLLISION / APPROACH
+# Va chạm giữa 2 người — 3 dạng tín hiệu bổ sung nhau:
+#   1) Tiếp cận nhanh: closing speed (2 người lao vào nhau).
+#   2) Di chuyển bất thường: ít nhất 1 người di chuyển nhanh lạ thường
+#      (speed vượt đi bộ/chạy thường), gia tốc/giảm tốc đột ngột, hoặc
+#      đổi hướng đột ngột — dấu hiệu chạy xô vào nhau / phanh gấp né.
+#   3) Đẩy ngã: 1 người ngã (tư thế nằm ngang / rơi nhanh) khi 2 người
+#      rất gần nhau — dấu hiệu bị va/đẩy ngã.
 # ============================================================
-PERSON_APPROACH_DIST_THRESH = 0.5    # Khoảng cách tương đối
-PERSON_APPROACH_SPEED_THRESH = 35.0  # Tốc độ tiến gần nhau (px/s)
+PERSON_APPROACH_DIST_THRESH = 0.5    # Khoảng cách tương đối (gate bắt buộc)
+PERSON_APPROACH_SPEED_THRESH = 35.0  # Closing speed (px/s) — tiếp cận nhanh
+PERSON_ABNORMAL_SPEED_THRESH = 35.0  # Speed 1 người bất thường (px/s) — đi vội/chạy (đi thường ~22)
+PERSON_ABNORMAL_ACCEL_THRESH = 80.0  # Gia tốc/giảm tốc đột ngột (px/s²)
+PERSON_DIR_CHANGE_THRESH = 1.5       # Đổi hướng đột ngột (radians)
+PERSON_FALL_PROX_DIST = 0.6          # Khoảng cách (rel) để coi là "bị va làm ngã"
+PERSON_COLLISION_SUSTAINED = 2       # Duy trì tín hiệu va chạm >= N frames (va chạm rất nhanh)
 
 # ============================================================
 # VEHICLE COLLISION — Accident Classifier (Multi-Feature)
@@ -216,10 +238,6 @@ SMOKE_FIRE_SMOKE_SOFT_GRAD_THRESH = 50.0   # Gradient nội tại < ngưỡng = 
 SMOKE_FIRE_SMOKE_SOFTNESS_THRESH = 0.40    # Tỷ lệ pixel mờ tối thiểu trong vùng khói
 SMOKE_FIRE_SMOKE_SHAPE_CHANGE_THRESH = 0.18  # Tỷ lệ hình dạng khói thay đổi giữa 2 frame
 SMOKE_FIRE_SMOKE_CHANGE_THRESH = 0.015     # Frame diff tối thiểu cho tín hiệu khói
-
-# Khói giai đoạn đầu: phát hiện sớm trước khi thấy rõ ngọn lửa -> tăng thời gian phản ứng
-SMOKE_FIRE_EARLY_SMOKE_PIXEL_THRESH = 250  # Pixel tối thiểu cho khói giai đoạn đầu
-SMOKE_FIRE_EARLY_SMOKE_PERSIST_THRESH = 3  # Persistence khói sớm (thấp hơn -> confirm nhanh hơn)
 
 # ============================================================
 # GRID / TILE DETECTION — Phát hiện nghi vấn theo TỪNG Ô NHỎ trong khung hình

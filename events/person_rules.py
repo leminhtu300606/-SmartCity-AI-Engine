@@ -15,6 +15,7 @@ class PersonActionRules:
     def __init__(self):
         # Temporal state cho sustained pairwise detection
         self.conflict_state = {}  # (min_id, max_id) -> sustained_count
+        self.collision_state = {}  # (min_id, max_id) -> sustained_count
 
     def check_fall(self, obj):
         """Phát hiện người ngã qua Aspect Ratio, Torso Angle & Gia tốc rơi.
@@ -133,8 +134,12 @@ class PersonActionRules:
         ]
         dist_variance = np.var(dists) if len(dists) > 1 else 0.0
 
+        # Bbox overlap (IoU): vật lộn/giằng co → 2 người dính sát, bbox chồng
+        # nhau nhiều. Ôm nhau / nói chuyện sát cũng có IoU cao NHƯNG jitter=0.
+        bbox_iou = self._calculate_iou(boxA, boxB)
+
         # ============================================================
-        # QUYẾT ĐỊNH 2 ĐƯỜNG
+        # QUYẾT ĐỊNH 3 ĐƯỜNG
         # ============================================================
         # Đường A — Pose: có người vung cổ tay nhanh (đấm/đánh)
         pose_punch = (max(wrist_A, wrist_B) > config.CONFLICT_WRIST_HIGH_THRESH)
@@ -146,6 +151,22 @@ class PersonActionRules:
         both_jittery = (min(jitter_A, jitter_B)
                         > config.CONFLICT_BBOX_JITTER_THRESH)
 
+        # Đường C — Grapple (vật lộn tại chỗ): 2 người dính sát, bbox chồng
+        # nhau (IoU cao) + ít nhất 1 người giằng co đáng kể. Đây là kiểu xô
+        # xát "bế/ôm/quật" mà 1 người bị khống chế có thể gần như đứng yên
+        # (jitter thấp) — không đạt signal_mutual của đường A/B.
+        # Phân biệt:
+        #   - Ôm nhau/nói chuyện: cả 2 gần như đứng yên (jitter ≈ 0) → không
+        #     đạt grapple_activity.
+        #   - Đi ngang/đứng gần: 2 bbox không chồng nhiều (IoU thấp) → không
+        #     đạt grapple_overlap.
+        #   - Đám đông chen lấn thoáng qua: IoU thấp (bbox cạnh nhau).
+        # IoU_THRESH để cao để chỉ bắt khi 2 người thực sự CHỒNG VÀO nhau.
+        grapple_overlap = (bbox_iou > config.CONFLICT_GRAPPLE_IOU_THRESH
+                           and dist < config.CONFLICT_GRAPPLE_DIST_THRESH)
+        grapple_activity = (max(jitter_A, jitter_B)
+                            > config.CONFLICT_GRAPPLE_MIN_JITTER)
+
         # Tương tác: người kia cũng động hoặc khoảng cách dao động mạnh
         signal_mutual = mutual_agitation > config.CONFLICT_MUTUAL_AGITATION_THRESH
         signal_oscillation = dist_variance > config.CONFLICT_DIST_VAR_THRESH
@@ -156,13 +177,21 @@ class PersonActionRules:
         # Đường B: cả 2 giật mạnh + có tương tác (đôi công / giằng co sát nhau)
         path_bbox = both_jittery and (signal_mutual or signal_oscillation)
 
-        is_candidate = path_pose or path_bbox
+        # Đường C: vật lộn — 2 người CHỒNG bbox + ít nhất 1 người giằng co.
+        # Không cần signal_mutual/oscillation vì "người bị giữ" thường đứng
+        # yên (đó là bản chất của vật lộn: 1 người khống chế, 1 người giãy).
+        # Ôm nhau: grapple_activity fail (jitter≈0). Đi ngang: grapple_overlap
+        # fail (IoU thấp).
+        path_grapple = (grapple_overlap and grapple_activity)
+
+        is_candidate = path_pose or path_bbox or path_grapple
 
         # Điểm kết hợp (chỉ để tính confidence)
         conflict_score = (max(wrist_A, wrist_B) * 0.4
                           + (jitter_A + jitter_B) * 0.2
                           + dist_variance * 40.0 * 0.3
-                          + mutual_agitation * 0.1)
+                          + mutual_agitation * 0.1
+                          + bbox_iou * 20.0 * 0.2)
 
         # Temporal sustained confirmation
         # Cap counter tại SUSTAINED + 2: khi hiện tượng dừng, chỉ cần decay
@@ -183,9 +212,17 @@ class PersonActionRules:
         return is_confirmed, conflict_score
 
     def check_person_collision(self, objA, objB):
-        """2 người tiếp cận nhanh / va chạm dựa trên proximity + closing speed.
+        """2 người va chạm / đụng nhau — bộ quyết định ĐA ĐƯỜNG.
 
-        Sử dụng trung bình closing speed qua vài frame để ổn định hơn.
+        Va chạm giữa người thường rất nhanh nên các tín hiệu riêng lẻ có thể
+        bị nhiễu 1 frame. Gộp 3 đường:
+          ĐƯỜNG A — Tiếp cận nhanh: 2 người lao vào nhau (closing speed cao).
+          ĐƯỜNG B — Di chuyển bất thường: ít nhất 1 người di chuyển nhanh lạ
+          thường (speed vượt đi bộ/chạy thường), gia tốc/giảm tốc đột ngột,
+          hoặc đổi hướng đột ngột — dấu hiệu chạy xô vào nhau / phanh gấp.
+          ĐƯỜNG C — Đẩy ngã: 1 người ở tư thế ngã (nằm ngang / rơi nhanh)
+          khi 2 người rất gần nhau — dấu hiệu bị va/đẩy ngã.
+        Tất cả cần proximity (dist) làm gate + duy trì >= N frame.
         """
         if len(objA.velocity_history) < 2 or len(objB.velocity_history) < 2:
             return False, 0.0
@@ -196,10 +233,18 @@ class PersonActionRules:
         avg_h = max(((boxA[3] - boxA[1]) + (boxB[3] - boxB[1])) / 2.0, 1e-5)
         dist = np.linalg.norm(centA - centB) / avg_h
 
+        pair_key = (min(objA.track_id, objB.track_id),
+                    max(objA.track_id, objB.track_id))
+
         if dist > config.PERSON_APPROACH_DIST_THRESH:
+            self.collision_state[pair_key] = max(
+                0, self.collision_state.get(pair_key, 0) - 1
+            )
             return False, 0.0
 
-        # Average closing speed qua vài frame để ổn định (tránh spike 1 frame)
+        # ============================================================
+        # ĐƯỜNG A — Closing speed (tiếp cận nhanh), trung bình vài frame
+        # ============================================================
         closing_speeds = []
         window = min(3, min(len(objA.center_history), len(objB.center_history)) - 1)
         for i in range(window):
@@ -213,25 +258,123 @@ class PersonActionRules:
             dir_vec = diff / norm
             vA = np.array(objA.velocity_history[idx])
             vB = np.array(objB.velocity_history[idx])
-            cs = float(np.dot(vA - vB, dir_vec))
-            closing_speeds.append(cs)
+            closing_speeds.append(float(np.dot(vA - vB, dir_vec)))
 
         avg_closing = np.mean(closing_speeds) if closing_speeds else 0.0
+        fast_approach = avg_closing > config.PERSON_APPROACH_SPEED_THRESH
 
-        if avg_closing > config.PERSON_APPROACH_SPEED_THRESH:
-            return True, min(1.0, avg_closing / 150.0)
-        return False, 0.0
+        # ============================================================
+        # ĐƯỜNG B — Di chuyển bất thường (nhanh / đột ngột / đổi hướng)
+        # ============================================================
+        speedA = float(np.linalg.norm(np.array(objA.velocity_history[-1])))
+        speedB = float(np.linalg.norm(np.array(objB.velocity_history[-1])))
+        max_speed = max(speedA, speedB)
+        abnormal_speed = max_speed > config.PERSON_ABNORMAL_SPEED_THRESH
+
+        accelA = float(np.linalg.norm(np.array(objA.accel_history[-1])))
+        accelB = float(np.linalg.norm(np.array(objB.accel_history[-1])))
+        max_accel = max(accelA, accelB)
+        sudden_accel = max_accel > config.PERSON_ABNORMAL_ACCEL_THRESH
+
+        dir_change = 0.0
+        if (len(objA.direction_history) >= 2 and len(objB.direction_history) >= 2):
+            dA = objA.direction_history[-1] - objA.direction_history[-2]
+            dB = objB.direction_history[-1] - objB.direction_history[-2]
+            # Wrap to [-pi, pi]
+            dA = abs((dA + np.pi) % (2 * np.pi) - np.pi)
+            dB = abs((dB + np.pi) % (2 * np.pi) - np.pi)
+            dir_change = max(dA, dB)
+        sudden_turn = dir_change > config.PERSON_DIR_CHANGE_THRESH
+
+        abnormal_motion = (abnormal_speed or sudden_accel or sudden_turn)
+
+        # ============================================================
+        # ĐƯỜNG C — Đẩy ngã: 1 người ngã khi 2 người rất gần nhau
+        # ============================================================
+        fall_prox = dist < config.PERSON_FALL_PROX_DIST
+        fell = self._is_falling(objA) or self._is_falling(objB)
+        push_fall = fall_prox and fell
+
+        # ============================================================
+        # KẾT HỢP + SUSTAINED
+        # Va chạm thật = 1 người chuyển động BẤT THƯỜNG (chạy nhanh/đột ngột/
+        # đổi hướng) khi 2 người đang rất gần hoặc đang lao vào nhau (closing
+        # cao). Hai người đi ngang/cạnh nhau với tốc độ bình thường (speed
+        # không bất thường) → không báo. Đẩy ngã bắt riêng.
+        # ============================================================
+        close_prox = dist < 0.35
+        is_candidate = (
+            push_fall
+            or (abnormal_motion and (close_prox or fast_approach))
+        )
+
+        # Điểm va chạm (confidence) — kết hợp các tín hiệu
+        collision_score = (
+            min(avg_closing / 150.0, 1.0) * 0.30
+            + min(max_speed / 120.0, 1.0) * 0.25
+            + min(max_accel / 200.0, 1.0) * 0.20
+            + min(dir_change / 3.0, 1.0) * 0.15
+            + (1.0 if push_fall else 0.0) * 0.10
+        )
+
+        if is_candidate:
+            self.collision_state[pair_key] = min(
+                config.PERSON_COLLISION_SUSTAINED + 2,
+                self.collision_state.get(pair_key, 0) + 1,
+            )
+        else:
+            self.collision_state[pair_key] = max(
+                0, self.collision_state.get(pair_key, 0) - 1
+            )
+
+        is_confirmed = (is_candidate
+                        and self.collision_state.get(pair_key, 0)
+                        >= config.PERSON_COLLISION_SUSTAINED)
+        return is_confirmed, collision_score
+
+    def _is_falling(self, obj):
+        """1 người đang ở tư thế ngã: nằm ngang hoặc rơi nhanh theo trục dọc."""
+        if len(obj.bbox_history) < 2:
+            return False
+        box = obj.bbox_history[-1]
+        w = box[2] - box[0]
+        h = max(box[3] - box[1], 1e-5)
+        aspect_ratio = w / h
+        person_height = h
+
+        vel_y_norm = [v[1] / max(person_height, 1.0)
+                      for v in list(obj.velocity_history)[-3:]]
+        max_vel_y = max(vel_y_norm, default=0.0)
+        acc_y_norm = [a[1] / max(person_height, 1.0)
+                      for a in list(obj.accel_history)[-3:]]
+        falling_motion = (max_vel_y > config.FALL_VEL_NORM_THRESH
+                          or any(a > config.FALL_ACCEL_NORM_THRESH for a in acc_y_norm))
+        return (aspect_ratio > config.FALL_ASPECT_RATIO_THRESH
+                or falling_motion)
 
     def cleanup_lost_tracks(self, active_track_ids):
-        """Xoá conflict state cho các track đã mất dấu."""
-        lost_pairs = [k for k in self.conflict_state
-                      if k[0] not in active_track_ids or k[1] not in active_track_ids]
-        for k in lost_pairs:
-            del self.conflict_state[k]
+        """Xoá conflict/collision state cho các track đã mất dấu."""
+        for state_map in (self.conflict_state, self.collision_state):
+            lost_pairs = [k for k in state_map
+                          if k[0] not in active_track_ids
+                          or k[1] not in active_track_ids]
+            for k in lost_pairs:
+                del state_map[k]
 
     # ----------------------------------------------------------------
     # Private Helpers
     # ----------------------------------------------------------------
+
+    def _calculate_iou(self, boxA, boxB):
+        """Bbox IoU giữa 2 người — dùng cho đường vật lộn (grapple)."""
+        xA = max(boxA[0], boxB[0])
+        yA = max(boxA[1], boxB[1])
+        xB = min(boxA[2], boxB[2])
+        yB = min(boxA[3], boxB[3])
+        interArea = max(0, xB - xA) * max(0, yB - yA)
+        boxAArea = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
+        boxBArea = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
+        return interArea / float(boxAArea + boxBArea - interArea + 1e-5)
 
     def _get_bbox_jitter(self, obj):
         """Agitation score từ movement pattern analysis (fallback khi không có pose).

@@ -50,7 +50,17 @@ class EventVisualizer:
         cv2.putText(canvas, f"{camera_id} | {hud}", (10, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1)
 
-        # 2b. Vẽ lưới ô nhỏ (grid) cho phát hiện khói/lửa theo từng điểm
+        # 3. Gom chung AI Events & Sensor Alerts (dedup: chỉ giữ 1 cảnh báo mỗi loại)
+        all_alerts = []
+        seen_types = set()
+
+        # CHỈ vẽ overlay cảnh báo (grid + bbox + banner) khi frame này CÓ sự kiện.
+        # Frame không có gì → video sạch, không hiện cảnh báo.
+        has_events = bool(active_events) or bool(sensor_alerts)
+        if not has_events:
+            return canvas
+
+        # 3b. Vẽ lưới ô nhỏ (grid) cho phát hiện khói/lửa theo từng điểm
         if config.SMOKE_FIRE_GRID_ENABLED:
             h, w = canvas.shape[:2]
             step_x = w / config.SMOKE_FIRE_GRID_COLS
@@ -63,11 +73,7 @@ class EventVisualizer:
                 y = int(round(j * step_y))
                 cv2.line(canvas, (0, y), (w, y), grid_color, 1)
 
-        # 3. Gom chung AI Events & Sensor Alerts (dedup: chỉ giữ 1 cảnh báo mỗi loại)
-        all_alerts = []
-        seen_types = set()
-
-        # 3b. Vẽ bbox VỊ TRÍ nghi vấn lên khung hình (trước khi dedup banner)
+        # 3c. Vẽ bbox VỊ TRÍ nghi vấn lên khung hình (trước khi dedup banner)
         #     Lửa/khói theo ô: bbox = ô grid. Đánh nhau/va chạm: bbox = vùng 2 đối tượng.
         for ev in list(active_events):
             box = self._to_int_bbox(ev.get("bbox"))
