@@ -82,7 +82,7 @@ class IntrusionRules:
                 "track_ids": [obj.track_id],
                 "zone_name": zone_name,
                 "bbox": [int(v) for v in curr_bbox],
-                "confidence": min(0.98, 0.85 + dwell_bonus + depth_bonus),
+                "confidence": min(0.98, 0.90 + dwell_bonus + depth_bonus),
                 "description": f"Phát hiện xâm nhập khu vực cấm {zone_name}",
             })
 

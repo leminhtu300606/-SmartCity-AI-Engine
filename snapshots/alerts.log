@@ -1,0 +1,63 @@
+[17:18:45] [cam10] FIRE_DETECTED | conf=0.941 | bbox=[160,0,320,128] | Phát hiện đám cháy tại ô Fire_Risk_Zone_10|r0c1 | snapshot=alert_1.jpg crop=alert_1_crop.jpg
+[17:18:45] [cam10] FIRE_DETECTED | conf=0.98 | bbox=[320,0,480,128] | Phát hiện đám cháy tại ô Fire_Risk_Zone_10|r0c2 | snapshot=alert_2.jpg crop=alert_2_crop.jpg
+[17:18:45] [cam10] FIRE_DETECTED | conf=0.98 | bbox=[320,128,480,256] | Phát hiện đám cháy tại ô Fire_Risk_Zone_10|r1c2 | snapshot=alert_3.jpg crop=alert_3_crop.jpg
+[17:18:47] [cam10] FIRE_DETECTED | conf=0.943 | bbox=[160,0,320,128] | Phát hiện đám cháy tại ô Fire_Risk_Zone_10|r0c1 | snapshot=alert_4.jpg crop=alert_4_crop.jpg
+[17:18:51] [cam10] FIRE_DETECTED | conf=0.947 | bbox=[320,256,480,384] | Phát hiện đám cháy tại ô Fire_Risk_Zone_10|r2c2 | snapshot=alert_5.jpg crop=alert_5_crop.jpg
+[17:18:51] [cam10] FIRE_DETECTED | conf=0.947 | bbox=[320,256,480,384] | Phát hiện đám cháy tại ô Fire_Risk_Zone_10|r2c2 | snapshot=alert_6.jpg crop=alert_6_crop.jpg
+[17:18:52] [cam10] FIRE_DETECTED | conf=0.98 | bbox=[160,0,320,128] | Phát hiện đám cháy tại ô Fire_Risk_Zone_10|r0c1 | snapshot=alert_7.jpg crop=alert_7_crop.jpg
+[17:18:55] [cam10] FIRE_DETECTED | conf=0.9 | bbox=[160,0,320,128] | Phát hiện điểm cháy nhỏ tại ô Fire_Risk_Zone_10|r0c1 | snapshot=alert_8.jpg crop=alert_8_crop.jpg
+[17:18:55] [cam10] FIRE_DETECTED | conf=0.98 | bbox=[320,0,480,128] | Phát hiện đám cháy tại ô Fire_Risk_Zone_10|r0c2 | snapshot=alert_9.jpg crop=alert_9_crop.jpg
+[17:18:56] [cam10] FIRE_DETECTED | conf=0.98 | bbox=[320,128,480,256] | Phát hiện đám cháy tại ô Fire_Risk_Zone_10|r1c2 | snapshot=alert_10.jpg crop=alert_10_crop.jpg
+[17:18:58] [cam10] FIRE_DETECTED | conf=0.944 | bbox=[320,0,480,128] | Phát hiện đám cháy tại ô Fire_Risk_Zone_10|r0c2 | snapshot=alert_11.jpg crop=alert_11_crop.jpg
+[17:19:05] [cam10] FIRE_DETECTED | conf=0.98 | bbox=[320,0,480,128] | Phát hiện đám cháy tại ô Fire_Risk_Zone_10|r0c2 | snapshot=alert_12.jpg crop=alert_12_crop.jpg
+[17:19:09] [cam10] FIRE_DETECTED | conf=0.946 | bbox=[320,128,480,256] | Phát hiện đám cháy tại ô Fire_Risk_Zone_10|r1c2 | snapshot=alert_13.jpg crop=alert_13_crop.jpg
+[17:19:09] [cam10] FIRE_DETECTED | conf=0.944 | bbox=[320,0,480,128] | Phát hiện đám cháy tại ô Fire_Risk_Zone_10|r0c2 | snapshot=alert_14.jpg crop=alert_14_crop.jpg
+[17:19:09] [cam10] FIRE_DETECTED | conf=0.98 | bbox=[320,0,480,128] | Phát hiện đám cháy tại ô Fire_Risk_Zone_10|r0c2 | snapshot=alert_15.jpg crop=alert_15_crop.jpg
+[17:19:12] [cam10] FIRE_DETECTED | conf=0.946 | bbox=[320,128,480,256] | Phát hiện đám cháy tại ô Fire_Risk_Zone_10|r1c2 | snapshot=alert_16.jpg crop=alert_16_crop.jpg
+[17:19:12] [cam10] FIRE_DETECTED | conf=0.98 | bbox=[320,0,480,128] | Phát hiện đám cháy tại ô Fire_Risk_Zone_10|r0c2 | snapshot=alert_17.jpg crop=alert_17_crop.jpg
+[17:19:13] [cam10] FIRE_DETECTED | conf=0.944 | bbox=[320,0,480,128] | Phát hiện đám cháy tại ô Fire_Risk_Zone_10|r0c2 | snapshot=alert_18.jpg crop=alert_18_crop.jpg
+[17:19:16] [cam10] FIRE_DETECTED | conf=0.9 | bbox=[320,0,480,128] | Phát hiện điểm cháy nhỏ tại ô Fire_Risk_Zone_10|r0c2 | snapshot=alert_19.jpg crop=alert_19_crop.jpg
+[17:19:17] [cam10] FIRE_DETECTED | conf=0.98 | bbox=[320,128,480,256] | Phát hiện đám cháy tại ô Fire_Risk_Zone_10|r1c2 | snapshot=alert_20.jpg crop=alert_20_crop.jpg
+[17:19:19] [cam10] FIRE_DETECTED | conf=0.98 | bbox=[160,128,320,256] | Phát hiện đám cháy tại ô Fire_Risk_Zone_10|r1c1 | snapshot=alert_21.jpg crop=alert_21_crop.jpg
+[17:22:10] [cam09] FIRE_DETECTED | conf=0.902 | bbox=[160,256,320,384] | Phát hiện quầng sáng cháy (lửa có thể bị che khuất) tại ô Fire_Risk_Zone_09|r2c1 | snapshot=alert_1.jpg crop=alert_1_crop.jpg
+[17:22:42] [cam09] FIRE_DETECTED | conf=0.901 | bbox=[160,0,320,128] | Phát hiện quầng sáng cháy (lửa có thể bị che khuất) tại ô Fire_Risk_Zone_09|r0c1 | snapshot=alert_2.jpg crop=alert_2_crop.jpg
+[17:23:15] [cam09] FIRE_DETECTED | conf=0.901 | bbox=[0,0,160,128] | Phát hiện quầng sáng cháy (lửa có thể bị che khuất) tại ô Fire_Risk_Zone_09|r0c0 | snapshot=alert_3.jpg crop=alert_3_crop.jpg
+[17:23:41] [cam09] FIRE_DETECTED | conf=0.901 | bbox=[320,0,480,128] | Phát hiện quầng sáng cháy (lửa có thể bị che khuất) tại ô Fire_Risk_Zone_09|r0c2 | snapshot=alert_4.jpg crop=alert_4_crop.jpg
+[17:24:37] [cam09] FIRE_DETECTED | conf=0.922 | bbox=[320,0,480,128] | Phát hiện quầng sáng cháy (lửa có thể bị che khuất) tại ô Fire_Risk_Zone_09|r0c2 | snapshot=alert_5.jpg crop=alert_5_crop.jpg
+[17:24:38] [cam09] VEHICLE_COLLISION | conf=0.927 | bbox=[112,6,264,54] | Phát hiện va chạm phương tiện/vật thể | snapshot=alert_6.jpg crop=alert_6_crop.jpg
+[17:24:38] [cam09] VEHICLE_COLLISION | conf=0.939 | bbox=[111,4,252,55] | Phát hiện va chạm phương tiện/vật thể | snapshot=alert_7.jpg crop=alert_7_crop.jpg
+[17:24:39] [cam09] VEHICLE_COLLISION | conf=0.942 | bbox=[113,4,240,58] | Phát hiện va chạm phương tiện/vật thể | snapshot=alert_8.jpg crop=alert_8_crop.jpg
+[17:24:39] [cam09] VEHICLE_COLLISION | conf=0.924 | bbox=[407,0,455,24] | Phát hiện va chạm phương tiện/vật thể | snapshot=alert_9.jpg crop=alert_9_crop.jpg
+[17:24:39] [cam09] VEHICLE_COLLISION | conf=0.901 | bbox=[408,0,456,24] | Phát hiện va chạm phương tiện/vật thể | snapshot=alert_10.jpg crop=alert_10_crop.jpg
+[17:24:41] [cam09] VEHICLE_COLLISION | conf=0.911 | bbox=[13,10,192,91] | Phát hiện va chạm phương tiện/vật thể | snapshot=alert_11.jpg crop=alert_11_crop.jpg
+[17:24:41] [cam09] VEHICLE_COLLISION | conf=0.941 | bbox=[15,10,180,100] | Phát hiện va chạm phương tiện/vật thể | snapshot=alert_12.jpg crop=alert_12_crop.jpg
+[17:24:44] [cam09] SMOKE_DETECTED | conf=0.98 | bbox=[320,256,480,384] | Phát hiện khói bất thường tại ô Fire_Risk_Zone_09|r2c2 | snapshot=alert_13.jpg crop=alert_13_crop.jpg
+[17:24:49] [cam09] FIRE_DETECTED | conf=0.911 | bbox=[320,128,480,256] | Phát hiện quầng sáng cháy (lửa có thể bị che khuất) tại ô Fire_Risk_Zone_09|r1c2 | snapshot=alert_14.jpg crop=alert_14_crop.jpg
+[17:24:53] [cam09] FIRE_DETECTED | conf=0.924 | bbox=[320,0,480,128] | Phát hiện quầng sáng cháy (lửa có thể bị che khuất) tại ô Fire_Risk_Zone_09|r0c2 | snapshot=alert_15.jpg crop=alert_15_crop.jpg
+[17:24:57] [cam09] FIRE_DETECTED | conf=0.939 | bbox=[160,256,320,384] | Phát hiện quầng sáng cháy (lửa có thể bị che khuất) tại ô Fire_Risk_Zone_09|r2c1 | snapshot=alert_16.jpg crop=alert_16_crop.jpg
+[17:24:57] [cam09] FIRE_DETECTED | conf=0.939 | bbox=[160,256,320,384] | Phát hiện quầng sáng cháy (lửa có thể bị che khuất) tại ô Fire_Risk_Zone_09|r2c1 | snapshot=alert_17.jpg crop=alert_17_crop.jpg
+[17:24:59] [cam09] FIRE_DETECTED | conf=0.901 | bbox=[160,128,320,256] | Phát hiện quầng sáng cháy (lửa có thể bị che khuất) tại ô Fire_Risk_Zone_09|r1c1 | snapshot=alert_18.jpg crop=alert_18_crop.jpg
+[17:25:17] [cam09] FIRE_DETECTED | conf=0.901 | bbox=[0,128,160,256] | Phát hiện quầng sáng cháy (lửa có thể bị che khuất) tại ô Fire_Risk_Zone_09|r1c0 | snapshot=alert_19.jpg crop=alert_19_crop.jpg
+[17:25:22] [cam09] FIRE_DETECTED | conf=0.903 | bbox=[480,128,640,256] | Phát hiện quầng sáng cháy (lửa có thể bị che khuất) tại ô Fire_Risk_Zone_09|r1c3 | snapshot=alert_20.jpg crop=alert_20_crop.jpg
+[17:25:24] [cam09] FIRE_DETECTED | conf=0.902 | bbox=[0,256,160,384] | Phát hiện quầng sáng cháy (lửa có thể bị che khuất) tại ô Fire_Risk_Zone_09|r2c0 | snapshot=alert_21.jpg crop=alert_21_crop.jpg
+[17:25:26] [cam09] FIRE_DETECTED | conf=0.914 | bbox=[320,0,480,128] | Phát hiện quầng sáng cháy (lửa có thể bị che khuất) tại ô Fire_Risk_Zone_09|r0c2 | snapshot=alert_22.jpg crop=alert_22_crop.jpg
+[17:25:33] [cam09] SMOKE_DETECTED | conf=0.98 | bbox=[320,128,480,256] | Phát hiện khói bất thường tại ô Fire_Risk_Zone_09|r1c2 | snapshot=alert_23.jpg crop=alert_23_crop.jpg
+[17:25:34] [cam09] SMOKE_DETECTED | conf=0.98 | bbox=[160,128,320,256] | Phát hiện khói bất thường tại ô Fire_Risk_Zone_09|r1c1 | snapshot=alert_24.jpg crop=alert_24_crop.jpg
+[17:25:35] [cam09] FIRE_DETECTED | conf=0.905 | bbox=[0,0,160,128] | Phát hiện quầng sáng cháy (lửa có thể bị che khuất) tại ô Fire_Risk_Zone_09|r0c0 | snapshot=alert_25.jpg crop=alert_25_crop.jpg
+[17:25:35] [cam09] SMOKE_DETECTED | conf=0.98 | bbox=[160,0,320,128] | Phát hiện khói bất thường tại ô Fire_Risk_Zone_09|r0c1 | snapshot=alert_26.jpg crop=alert_26_crop.jpg
+[17:25:36] [cam09] SMOKE_DETECTED | conf=0.98 | bbox=[480,0,640,128] | Phát hiện khói bất thường tại ô Fire_Risk_Zone_09|r0c3 | snapshot=alert_27.jpg crop=alert_27_crop.jpg
+[17:25:37] [cam09] FIRE_DETECTED | conf=0.901 | bbox=[480,0,640,128] | Phát hiện quầng sáng cháy (lửa có thể bị che khuất) tại ô Fire_Risk_Zone_09|r0c3 | snapshot=alert_28.jpg crop=alert_28_crop.jpg
+[17:25:42] [cam09] HUMAN_CONFLICT | conf=1.0 | bbox=[139,89,269,374] | Phát hiện xô xát/đánh nhau/giằng co | snapshot=alert_29.jpg crop=alert_29_crop.jpg
+[17:26:06] [cam09] FIRE_DETECTED | conf=0.902 | bbox=[320,0,480,128] | Phát hiện quầng sáng cháy (lửa có thể bị che khuất) tại ô Fire_Risk_Zone_09|r0c2 | snapshot=alert_30.jpg crop=alert_30_crop.jpg
+[17:26:28] [cam09] FIRE_DETECTED | conf=0.902 | bbox=[480,0,640,128] | Phát hiện quầng sáng cháy (lửa có thể bị che khuất) tại ô Fire_Risk_Zone_09|r0c3 | snapshot=alert_31.jpg crop=alert_31_crop.jpg
+[18:23:18] [cam09] FIRE_DETECTED | conf=0.9 | bbox=[160,128,320,256] | Phát hiện điểm cháy nhỏ tại ô Fire_Risk_Zone_09|r1c1 | snapshot=alert_32.jpg crop=alert_32_crop.jpg
+[18:23:34] [cam09] FIRE_DETECTED | conf=0.9 | bbox=[160,256,320,384] | Phát hiện điểm cháy nhỏ tại ô Fire_Risk_Zone_09|r2c1 | snapshot=alert_33.jpg crop=alert_33_crop.jpg
+[18:24:09] [cam09] HUMAN_CONFLICT | conf=1.0 | bbox=[90,151,287,383] | Phát hiện xô xát/đánh nhau/giằng co | snapshot=alert_34.jpg crop=alert_34_crop.jpg
+[18:24:11] [cam09] HUMAN_CONFLICT | conf=1.0 | bbox=[90,153,294,383] | Phát hiện xô xát/đánh nhau/giằng co | snapshot=alert_35.jpg crop=alert_35_crop.jpg
+[18:24:11] [cam09] HUMAN_CONFLICT | conf=1.0 | bbox=[90,153,298,383] | Phát hiện xô xát/đánh nhau/giằng co | snapshot=alert_36.jpg crop=alert_36_crop.jpg
+[18:24:12] [cam09] HUMAN_CONFLICT | conf=1.0 | bbox=[87,152,299,383] | Phát hiện xô xát/đánh nhau/giằng co | snapshot=alert_37.jpg crop=alert_37_crop.jpg
+[18:24:12] [cam09] HUMAN_CONFLICT | conf=1.0 | bbox=[88,152,298,383] | Phát hiện xô xát/đánh nhau/giằng co | snapshot=alert_38.jpg crop=alert_38_crop.jpg
+[18:24:13] [cam09] HUMAN_CONFLICT | conf=1.0 | bbox=[88,152,295,383] | Phát hiện xô xát/đánh nhau/giằng co | snapshot=alert_39.jpg crop=alert_39_crop.jpg
+[18:24:13] [cam09] HUMAN_CONFLICT | conf=1.0 | bbox=[89,152,290,383] | Phát hiện xô xát/đánh nhau/giằng co | snapshot=alert_40.jpg crop=alert_40_crop.jpg
+[18:24:14] [cam09] HUMAN_CONFLICT | conf=1.0 | bbox=[88,151,281,383] | Phát hiện xô xát/đánh nhau/giằng co | snapshot=alert_41.jpg crop=alert_41_crop.jpg
+[18:24:14] [cam09] HUMAN_CONFLICT | conf=1.0 | bbox=[84,151,267,383] | Phát hiện xô xát/đánh nhau/giằng co | snapshot=alert_42.jpg crop=alert_42_crop.jpg

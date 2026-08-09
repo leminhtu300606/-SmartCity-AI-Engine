@@ -85,7 +85,7 @@ class RuleBasedEventClassifier:
                             "event_type": "VEHICLE_STOP_ANOMALY",
                             "track_ids": [obj.track_id],
                             "bbox": self._get_bbox(obj),
-                            "confidence": 0.85,
+                            "confidence": 0.90,
                             "description":
                                 "Xe tai nạn / dừng bất thường giữa đường",
                         })
@@ -129,15 +129,48 @@ class RuleBasedEventClassifier:
 
                     # Logic 2: Vehicle collision
                     if oA.cls_id in [2, 3, 5, 7] or oB.cls_id in [2, 3, 5, 7]:
-                        is_collision, c_score = self.vehicle_rules.check_collision(oA, oB)
-                        if is_collision:
+                        # 2.1) Xe - Xe (cả 2 là phương tiện)
+                        if oA.cls_id in [2, 3, 5, 7] and oB.cls_id in [2, 3, 5, 7]:
+                            is_collision, c_score = self.vehicle_rules.check_collision(oA, oB)
+                            if is_collision:
+                                candidates.append({
+                                    "event_type": "VEHICLE_COLLISION",
+                                    "track_ids": [oA.track_id, oB.track_id],
+                                    "bbox": self._union_bbox(oA, oB),
+                                    "confidence": min(0.98, 0.75 + c_score * 0.25),
+                                    "description":
+                                        "Phát hiện va chạm phương tiện/vật thể",
+                                })
+
+                        # 2.2) Xe - Vật thể / người (chỉ 1 bên là xe)
+                        else:
+                            objV = oA if oA.cls_id in [2, 3, 5, 7] else oB
+                            objO = oB if objV is oA else oA
+                            is_obj_collision, oc_score = (
+                                self.vehicle_rules.check_object_collision(objV, objO)
+                            )
+                            if is_obj_collision:
+                                candidates.append({
+                                    "event_type": config.EVENT_TYPE_VEHICLE_OBJECT_COLLISION,
+                                    "track_ids": [oA.track_id, oB.track_id],
+                                    "bbox": self._union_bbox(oA, oB),
+                                    "confidence": min(0.95, 0.70 + oc_score * 0.25),
+                                    "description":
+                                        "Phát hiện xe va chạm vật thể/người",
+                                })
+
+                        # 2.3) Vật thể rơi vào xe (cả 2 hướng: xe-vật, vật-xe)
+                        is_falling, f_score = (
+                            self.vehicle_rules.check_object_falling(oA, oB)
+                        )
+                        if is_falling:
                             candidates.append({
-                                "event_type": "VEHICLE_COLLISION",
+                                "event_type": config.EVENT_TYPE_OBJECT_FALLING,
                                 "track_ids": [oA.track_id, oB.track_id],
                                 "bbox": self._union_bbox(oA, oB),
-                                "confidence": min(0.98, 0.75 + c_score * 0.25),
+                                "confidence": f_score,
                                 "description":
-                                    "Phát hiện va chạm phương tiện/vật thể",
+                                    "Phát hiện vật thể rơi từ trên xuống trúng xe",
                             })
 
             # --------------------------------------------------------

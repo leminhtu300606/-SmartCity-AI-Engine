@@ -8,18 +8,19 @@ import config
 from tracker.memory_manager import ObjectMemoryManager
 from events.classifier import RuleBasedEventClassifier
 from events.visualizer import EventVisualizer
-from sensors.mqtt_consumer import SensorMQTTConsumer
 from detector import YOLODetector
+from dashboard.store import AlertStore
+from dashboard.server import start_dashboard
 
 
 class CameraWorker(threading.Thread):
     """Worker Thread xử lý riêng từng Camera Stream (HLS/RTSP)."""
 
-    def __init__(self, camera_id, stream_url, sensor_consumer):
+    def __init__(self, camera_id, stream_url, alert_store=None):
         super().__init__()
         self.camera_id = camera_id
         self.stream_url = stream_url
-        self.sensor_consumer = sensor_consumer
+        self.alert_store = alert_store
         self.memory_mgr = ObjectMemoryManager(maxlen=config.TEMPORAL_BUFFER_MAXLEN)
         self.event_classifier = RuleBasedEventClassifier()
         self.visualizer = EventVisualizer()
@@ -42,13 +43,16 @@ class CameraWorker(threading.Thread):
         return cv2.VideoCapture(self.stream_url, cv2.CAP_FFMPEG)
 
     def run(self):
+        headless = getattr(config, "HEADLESS", False)
         print(f"[{self.camera_id}] Source: {self.stream_url}"
               + (" (video local)" if self._is_file_source else " (HLS/RTSP stream)"))
+        print(f"[{self.camera_id}] Mode: {'HEADLESS (log + snapshot)' if headless else 'GUI (cửa sổ video)'}")
         cap = self._open_capture()
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
         window_name = f"SmartVision AI Engine - {self.camera_id}"
-        cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+        if not headless:
+            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
         frame_idx = 0
 
@@ -73,11 +77,12 @@ class CameraWorker(threading.Thread):
             # Detect mỗi DETECTION_INTERVAL frame, frame giữa dùng tracking dự đoán
             if frame_idx % config.DETECTION_INTERVAL == 0:
                 active_tracks = self.detector.detect(frame_resized)
-                counts = {}
-                for tr in active_tracks:
-                    counts[tr["cls_id"]] = counts.get(tr["cls_id"], 0) + 1
-                desc = ", ".join(f"{self.cls_names.get(k, k)} x{v}" for k, v in counts.items()) or "none"
-                print(f"[{self.camera_id}] frame {frame_idx}: detected {desc}")
+                if not headless:
+                    counts = {}
+                    for tr in active_tracks:
+                        counts[tr["cls_id"]] = counts.get(tr["cls_id"], 0) + 1
+                    desc = ", ".join(f"{self.cls_names.get(k, k)} x{v}" for k, v in counts.items()) or "none"
+                    print(f"[{self.camera_id}] frame {frame_idx}: detected {desc}")
             else:
                 active_tracks = self._predict_tracks(timestamp, frame_idx)
 
@@ -92,21 +97,30 @@ class CameraWorker(threading.Thread):
                 is_detection_frame=(frame_idx % config.DETECTION_INTERVAL == 0),
                 frame_idx=frame_idx,
             )
-            self._log_events(events)
+            # Chỉ đưa alert có confidence đủ cao (giảm nhiễu / cảnh báo linh tinh)
+            events = [ev for ev in events
+                      if ev.get("confidence", 0.0) >= config.MIN_ALERT_CONFIDENCE]
+            new_alert_events = self._log_events(events)
 
-            # Step 5: Lấy Sensor Alerts từ MQTT Consumer
-            sensor_alerts = self.sensor_consumer.get_latest_alerts()
-
-            # Step 6: Visual Overlay trực tiếp lên Video
+            # Step 5: Visual Overlay trực tiếp lên Video
             annotated_frame = self.visualizer.draw(
                 frame_resized,
                 self.memory_mgr,
                 events,
-                sensor_alerts=sensor_alerts,
                 camera_id=self.camera_id,
             )
 
+            # Step 6: Đưa ảnh alert lên dashboard trực tiếp (trong bộ nhớ)
+            if self.alert_store is not None:
+                for ev in new_alert_events:
+                    alert = self.alert_store.record(self.camera_id, ev, annotated_frame)
+                    if alert is not None:
+                        print(f"[ALERT-IMG:{self.camera_id}] Đưa ảnh lên dashboard: "
+                              f"{alert['snapshot']} (crop: {alert['crop']})")
+
             # Step 7: Render
+            if headless:
+                continue
             cv2.imshow(window_name, annotated_frame)
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 self.stopped = True
@@ -116,7 +130,11 @@ class CameraWorker(threading.Thread):
         cv2.destroyWindow(window_name)
 
     def _log_events(self, events):
-        """Log alert khi event lần đầu được xác nhận (tránh spam lặp mỗi frame)."""
+        """Log alert khi event lần đầu được xác nhận (tránh spam lặp mỗi frame).
+
+        Trả về danh sách event MỚI được xác nhận (để chụp snapshot dashboard).
+        """
+        new_events = []
         current_keys = set()
         for ev in events:
             key = (ev["event_type"], tuple(ev.get("track_ids", [])), ev.get("zone_name"))
@@ -125,11 +143,14 @@ class CameraWorker(threading.Thread):
                 self.active_alert_keys.add(key)
                 conf = ev.get("confidence", 0.0)
                 print(f"[ALERT:{self.camera_id}] {ev['event_type']} | {ev['description']} | conf={conf:.2f}")
+                new_events.append(ev)
 
         # Giải phóng key không còn xuất hiện để event giống nhau có thể alert lại sau này
         for key in list(self.active_alert_keys):
             if key not in current_keys:
                 self.active_alert_keys.discard(key)
+
+        return new_events
 
     def _predict_tracks(self, timestamp, frame_idx):
         """Tracking ở frame giữa: dự đoán bbox theo vận tốc.
@@ -179,6 +200,11 @@ def main():
         default=None,
         help="Đường dẫn video local để phân tích (nếu không có, dùng stream HLS của camera).",
     )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Chạy không cửa sổ video: chỉ log cảnh báo + chụp snapshot vị trí cảnh báo.",
+    )
     args = parser.parse_args()
 
     if not args.camera_id:
@@ -200,12 +226,19 @@ def main():
 
     source = args.video or config.CAMERA_STREAMS[args.camera_id]
 
-    # 1. Khởi chạy Sensor MQTT Consumer
-    sensor_consumer = SensorMQTTConsumer()
-    sensor_consumer.start()
+    # Bật headless mode qua CLI (ghi đè config)
+    if args.headless:
+        config.HEADLESS = True
+
+    # 1. Khởi chạy AlertStore + Dashboard Web (nếu bật)
+    alert_store = AlertStore(
+        snapshot_dir=config.SNAPSHOT_DIR,
+        max_alerts=config.SNAPSHOT_MAX_ALERTS,
+    )
+    start_dashboard(alert_store, config.SNAPSHOT_DIR, enabled=config.DASHBOARD_ENABLED)
 
     # 2. Khởi chạy DUY NHẤT worker của camera được chọn
-    worker = CameraWorker(args.camera_id, source, sensor_consumer)
+    worker = CameraWorker(args.camera_id, source, alert_store=alert_store)
     worker.daemon = True
     worker.start()
 

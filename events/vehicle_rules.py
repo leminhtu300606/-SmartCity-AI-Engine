@@ -29,6 +29,11 @@ class VehicleAccidentRules:
         self.pair_dist_hist = {}      # (min_id, max_id) -> deque(distances)
         self.pair_contact_frame = {}  # (min_id, max_id) -> frame gần nhất đạt proximity
 
+        # Vehicle ↔ Object / Falling object
+        self.object_collision_state = {}   # (min_id, max_id) -> sustained_count
+        self.object_fall_state = {}        # (min_id, max_id) -> sustained_count
+        self.object_fall_vy_hist = {}      # track_id -> [vy_norm, ...] quỹ đạo rơi
+
     def check_collision(self, objA, objB):
         """Accident Classifier: trích xuất đặc trưng -> chấm điểm -> quyết định."""
         if len(objA.bbox_history) < 3 or len(objB.bbox_history) < 3:
@@ -89,10 +94,21 @@ class VehicleAccidentRules:
             min(1.0, decelB / config.VEHICLE_DECEL_THRESH),
         )
 
+        # "Dừng đột ngột": vận tốc tức thời nhảy về ~0 trong 1 frame (va chạm
+        # mạnh) làm _get_deceleration trả 0 (vel≈0 bị bỏ qua). Bắt tín hiệu này
+        # từ lịch sử vận tốc: trước đó chạy nhanh, bây giờ đứng yên.
+        sharp_stop = max(self._get_sharp_stop(objA), self._get_sharp_stop(objB))
+        impact_score = max(decel_score, sharp_stop)
+
         # ------------------------------------------------------------
-        # FEATURE 6: Post-contact — dừng/đổi hướng bất thường sau tiếp xúc
+        # FEATURE 6: Post-contact — dừng/đổi hướng bất thường sau TIẾP XÚC THẬT
         # ------------------------------------------------------------
-        self._update_contact_frame(pair_key, is_proximate)
+        # CHỈ arm cửa sổ hậu va chạm khi bbox 2 xe THỰC SỰ chồng lên nhau
+        # (overlap), KHÔNG phải chỉ "gần nhau". Xe chạy sát / vượt gần nhau không
+        # overlap → không bao giờ kích nhánh post-contact → bỏ false positive
+        # do xe quẹo / dừng đèn đỏ cạnh xe khác.
+        has_overlap = iou > config.VEHICLE_IOU_THRESH
+        self._update_contact_frame(pair_key, has_overlap)
         post_contact_score = self._get_post_contact_anomaly(
             pair_key, objA, objB, dir_changeA, dir_changeB
         )
@@ -106,22 +122,22 @@ class VehicleAccidentRules:
             + w["closing"] * closing_score
             + w["dist_drop"] * dist_drop_score
             + w["direction"] * direction_score
-            + w["decel"] * decel_score
+            + w["decel"] * impact_score
             + w["post_contact"] * post_contact_score
         )
 
         # Gate bắt buộc: phải gần nhau (proximity là điều kiện cần) + phải có
         # TÍN HIỆU ĐỘNG HỌC thật. Xe đậu sát nhau / đi song song (closing≈0,
         # decel≈0) → KHÔNG phải va chạm dù bbox rất gần.
-        kinetic_signal = max(closing_score, decel_score)
+        kinetic_signal = max(closing_score, impact_score)
         has_kinetic = kinetic_signal > config.VEHICLE_COLLISION_MIN_KINETIC
 
         is_proximate_candidate = (is_proximate and has_kinetic
                                   and score > config.VEHICLE_COLLISION_SCORE_THRESH)
 
-        # Cho phép "hậu va chạm": ngay sau thời điểm tiếp xúc, xe bị hất lệch
-        # (đổi hướng đột ngột) hoặc dừng bất thường dù 2 xe đã bắt đầu tách xa.
-        # Tránh mất tín hiệu đúng lúc vụ va chạm đang xảy ra.
+        # Cho phép "hậu va chạm": ngay sau thời điểm TIẾP XÚC THẬT (bbox overlap),
+        # xe bị hất lệch (đổi hướng đột ngột) hoặc dừng bất thường dù 2 xe đã bắt
+        # đầu tách xa. Cửa sổ chỉ arm khi có overlap thật (xem _update_contact_frame).
         post_contact_only = (
             pair_key in self.pair_contact_frame
             and post_contact_score > 0.7
@@ -145,6 +161,156 @@ class VehicleAccidentRules:
         is_confirmed = (is_candidate
                         and self.collision_state.get(pair_key, 0)
                         >= config.VEHICLE_COLLISION_SUSTAINED)
+        return is_confirmed, score
+
+    def check_object_collision(self, objV, objO):
+        """Xe va chạm vật thể / người / xe 2 bánh (VEHICLE_OBJECT_COLLISION).
+
+        Khác check_collision (xe-xe): chỉ cần MỘT bên là xe (car/bus/truck),
+        bên kia là bất kỳ object nào — kể cả người (class 0), motorbike...
+        Vật thể nhỏ hơn xe nên:
+          - Proximity dùng dist/avg_diagonal (avg_diag thấp hơn -> tỉ lệ nhạy).
+          - Closing speed ngưỡng thấp hơn (vật thể nhẹ, va nhanh).
+          - IoU threshold thấp hơn (bbox vật thể nhỏ so với xe).
+        """
+        if len(objV.bbox_history) < 3 or len(objO.bbox_history) < 3:
+            return False, 0.0
+
+        boxV, boxO = objV.bbox_history[-1], objO.bbox_history[-1]
+        pair_key = (min(objV.track_id, objO.track_id),
+                    max(objV.track_id, objO.track_id))
+
+        # ------------------------------------------------------------
+        # PROXIMITY — gate bắt buộc
+        # ------------------------------------------------------------
+        diagV = np.sqrt((boxV[2] - boxV[0]) ** 2 + (boxV[3] - boxV[1]) ** 2)
+        diagO = np.sqrt((boxO[2] - boxO[0]) ** 2 + (boxO[3] - boxO[1]) ** 2)
+        avg_diag = max((diagV + diagO) / 2.0, 1e-5)
+
+        centV = np.array(objV.center_history[-1])
+        centO = np.array(objO.center_history[-1])
+        dist = float(np.linalg.norm(centV - centO))
+        rel_dist = dist / avg_diag
+        iou = self._calculate_iou(boxV, boxO)
+
+        is_proximate = (iou > config.VEHICLE_OBJECT_IOU_THRESH
+                        or rel_dist < config.VEHICLE_OBJECT_PROXIMITY_DIST_RATIO)
+        prox_score = min(1.0, iou * 2.0 + max(0.0, 1.0 - rel_dist
+                                              / config.VEHICLE_OBJECT_PROXIMITY_DIST_RATIO))
+
+        # ------------------------------------------------------------
+        # KINETIC SIGNALS — động học của va chạm
+        # ------------------------------------------------------------
+        closing = self._get_closing_speed(objV, objO)
+        closing_score = min(1.0, closing / config.VEHICLE_OBJECT_CLOSING_SPEED_THRESH)
+
+        # Vật thể nhỏ có thể bị hất lệch mạnh khi va chạm (đổi hướng đột ngột)
+        dirV = self._get_direction_change(objV)
+        dirO = self._get_direction_change(objO)
+        direction_score = max(
+            min(1.0, dirV / config.VEHICLE_DIR_CHANGE_THRESH),
+            min(1.0, dirO / config.VEHICLE_DIR_CHANGE_THRESH),
+        )
+
+        decelV = self._get_deceleration(objV)
+        decelO = self._get_deceleration(objO)
+        decel_score = max(
+            min(1.0, decelV / config.VEHICLE_DECEL_THRESH),
+            min(1.0, decelO / config.VEHICLE_DECEL_THRESH),
+        )
+        # Xe dừng đột ngột (va chạm mạnh) — bắt cả khi vận tốc nhảy về 0 trong 1 frame
+        sharp_stop = self._get_sharp_stop(objV)
+
+        # Người đang chạy nhanh / chuyển động bất thường gần xe (băng qua đường)
+        speedO = float(np.linalg.norm(np.array(objO.velocity_history[-1])))
+        speedO_score = min(1.0, speedO / config.PERSON_ABNORMAL_SPEED_THRESH)
+
+        # ------------------------------------------------------------
+        # ACCIDENT CLASSIFIER — điểm tổng hợp
+        # ------------------------------------------------------------
+        score = (
+            prox_score * 0.35
+            + closing_score * 0.25
+            + direction_score * 0.15
+            + max(decel_score, sharp_stop) * 0.15
+            + speedO_score * 0.10
+        )
+
+        # Gate: phải gần nhau + có tín hiệu động học thật (siết chặt hơn 0.15)
+        kinetic_signal = max(closing_score, decel_score, speedO_score, sharp_stop)
+        has_kinetic = kinetic_signal > 0.25
+
+        is_candidate = (is_proximate and has_kinetic
+                        and score > config.VEHICLE_OBJECT_SCORE_THRESH)
+
+        if is_candidate:
+            self.object_collision_state[pair_key] = min(
+                config.VEHICLE_OBJECT_SUSTAINED + 2,
+                self.object_collision_state.get(pair_key, 0) + 1,
+            )
+        else:
+            self.object_collision_state[pair_key] = max(
+                0, self.object_collision_state.get(pair_key, 0) - 1
+            )
+
+        is_confirmed = (is_candidate
+                        and self.object_collision_state.get(pair_key, 0)
+                        >= config.VEHICLE_OBJECT_SUSTAINED)
+        return is_confirmed, score
+
+    def check_object_falling(self, objV, objO):
+        """Vật thể rơi từ trên xuống trúng xe (OBJECT_FALLING_ON_VEHICLE).
+
+        Tín hiệu:
+          1. Quỹ đạo rơi: vận tốc dọc (vy) hướng xuống, |vy|/chiều cao object
+             vượt ngưỡng (rơi nhanh, không phải đi bộ/leo).
+          2. Chồng lấn: bbox vật thể rơi PHỦ LÊN bbox xe (overlap ratio cao) —
+             vật đang ở vị trí trúng xe.
+          Cả 2 duy trì >= OBJECT_FALL_SUSTAINED frames.
+
+        Phân biệt với collision: collision = vật đến TỪ MẶT ĐẤT tiến lại gần xe
+        (chuyển động ngang). Falling = vật rơi TỪ TRÊN XUỐNG (chuyển động dọc
+        chiếm ưu thế, |vy| >> |vx|).
+        """
+        if len(objV.bbox_history) < 4 or len(objO.bbox_history) < 4:
+            return False, 0.0
+
+        boxV, boxO = objV.bbox_history[-1], objO.bbox_history[-1]
+        pair_key = (min(objV.track_id, objO.track_id),
+                    max(objV.track_id, objO.track_id))
+
+        # ------------------------------------------------------------
+        # 1) Quỹ đạo rơi — dùng trung bình vy trong cửa sổ
+        # ------------------------------------------------------------
+        vy_norm = self._get_falling_velocity(objO)
+        if vy_norm is None:
+            return False, 0.0
+
+        is_falling = (vy_norm > config.OBJECT_FALL_VY_NORM_THRESH)
+
+        # ------------------------------------------------------------
+        # 2) Overlap với bbox xe — vật thể đang ở vị trí trúng xe
+        # ------------------------------------------------------------
+        overlap_ratio = self._fall_overlap_ratio(boxV, boxO)
+        is_overlapping = (overlap_ratio > config.OBJECT_FALL_OVERLAP_RATIO)
+
+        is_candidate = is_falling and is_overlapping
+
+        if is_candidate:
+            self.object_fall_state[pair_key] = min(
+                config.OBJECT_FALL_SUSTAINED + 2,
+                self.object_fall_state.get(pair_key, 0) + 1,
+            )
+        else:
+            self.object_fall_state[pair_key] = max(
+                0, self.object_fall_state.get(pair_key, 0) - 1
+            )
+
+        is_confirmed = (is_candidate
+                        and self.object_fall_state.get(pair_key, 0)
+                        >= config.OBJECT_FALL_SUSTAINED)
+        # Confidence: rơi nhanh + chồng lấn sâu
+        score = min(0.98, 0.6 + min(vy_norm / 4.0, 0.25) + overlap_ratio * 0.15)
         return is_confirmed, score
 
     def check_hard_stop(self, obj):
@@ -206,9 +372,9 @@ class VehicleAccidentRules:
             hist.pop(0)
         return max(0.0, prev - current_dist)
 
-    def _update_contact_frame(self, pair_key, is_proximate):
-        """Ghi nhận frame gần nhất mà 2 xe đạt proximity (thời điểm tiếp xúc)."""
-        if is_proximate:
+    def _update_contact_frame(self, pair_key, has_overlap):
+        """Ghi nhận frame gần nhất mà 2 xe THỰC SỰ chồng bbox (tiếp xúc thật)."""
+        if has_overlap:
             self.pair_contact_frame[pair_key] = config.VEHICLE_POST_CONTACT_WINDOW
         else:
             if pair_key in self.pair_contact_frame:
@@ -218,9 +384,9 @@ class VehicleAccidentRules:
 
     def _get_post_contact_anomaly(self, pair_key, objA, objB,
                                    dir_changeA, dir_changeB):
-        """Đặc trưng hậu va chạm: 1 xe dừng / đổi hướng NGAY SAU tiếp xúc.
+        """Đặc trưng hậu va chạm: 1 xe dừng / đổi hướng NGAY SAU tiếp xúc thật.
 
-        Nếu vừa xảy ra tiếp xúc (trong cửa sổ POST_CONTACT_WINDOW) và có dấu
+        Chỉ chạy khi cửa sổ TIẾP XÚC THẬT (bbox overlap) đang mở. Nếu có dấu
         hiệu: một xe đổi hướng đột ngột, hoặc tốc độ hiện tại rất thấp (dừng lại)
         trong khi trước đó đang chạy nhanh → nghiêng về tai nạn thật.
         """
@@ -244,6 +410,43 @@ class VehicleAccidentRules:
         if strong_turn:
             return 0.9
         return stopped_after_fast
+
+    def _get_falling_velocity(self, obj):
+        """Vận tốc dọc chuẩn hóa (|vy|/chiều cao object) — phát hiện quỹ đạo rơi.
+
+        Chỉ xét khi chuyển động dọc CHIẾM ƯU THẾ so với ngang (vật rơi không phải
+        chạy ngang). Dùng trung bình trong cửa sổ để chống nhiễu tracking.
+        Trả về None nếu chưa đủ dữ liệu.
+        """
+        if len(obj.velocity_history) < 2 or len(obj.bbox_history) == 0:
+            return None
+
+        window = min(config.OBJECT_FALL_WINDOW, len(obj.velocity_history))
+        vys = [v[1] for v in list(obj.velocity_history)[-window:]]
+        vxs = [v[0] for v in list(obj.velocity_history)[-window:]]
+
+        avg_vy = float(np.mean(vys))
+        avg_vx = float(np.mean(vxs))
+        # Rơi xuống: vy dương (y tăng về phía dưới). |vy| phải > 1.5*|vx|
+        if avg_vy <= 0 or abs(avg_vx) > abs(avg_vy) * 1.5:
+            return 0.0
+
+        box = obj.bbox_history[-1]
+        h = max(box[3] - box[1], 1e-5)
+        return avg_vy / h
+
+    def _fall_overlap_ratio(self, boxV, boxO):
+        """Tỷ lệ diện tích bbox vật thể rơi nằm TRONG bbox xe.
+
+        Vật thể rơi trúng xe → phần lớn bbox của nó nằm trong vùng xe.
+        """
+        xA = max(boxV[0], boxO[0])
+        yA = max(boxV[1], boxO[1])
+        xB = min(boxV[2], boxO[2])
+        yB = min(boxV[3], boxO[3])
+        inter = max(0, xB - xA) * max(0, yB - yA)
+        areaO = (boxO[2] - boxO[0]) * (boxO[3] - boxO[1])
+        return inter / max(areaO, 1e-5)
 
     def _get_closing_speed(self, objA, objB):
         """Tốc độ tiến lại gần nhau (chiếu relative velocity lên đường nối 2 tâm)."""
@@ -296,6 +499,22 @@ class VehicleAccidentRules:
         decel = -np.dot(acc, vel) / np.linalg.norm(vel)
         return max(0.0, decel)
 
+    def _get_sharp_stop(self, obj):
+        """Điểm 'dừng đột ngột' từ lịch sử vận tốc (0..1).
+
+        Va chạm mạnh làm vận tốc nhảy từ cao về ~0 trong 1 frame: lúc đó
+        _get_deceleration trả 0 (vì vel≈0). Đặc trưng này bắt chính xác tình
+        huống đó: trước đó chạy nhanh (prev_fast), bây giờ gần đứng yên (now).
+        """
+        if len(obj.velocity_history) < 4:
+            return 0.0
+        speeds = [np.linalg.norm(v) for v in list(obj.velocity_history)[-4:]]
+        now_speed = speeds[-1]
+        prev_fast = max(speeds[:-1])
+        if now_speed < 2.0 and prev_fast > 10.0:
+            return min(1.0, prev_fast / 20.0)
+        return 0.0
+
     def _get_direction_change(self, obj):
         if len(obj.direction_history) < 3:
             return 0.0
@@ -318,3 +537,15 @@ class VehicleAccidentRules:
         for k in lost_pairs:
             self.pair_dist_hist.pop(k, None)
             self.pair_contact_frame.pop(k, None)
+
+        # Vehicle ↔ Object / Falling object state
+        for state_map in (self.object_collision_state, self.object_fall_state):
+            lost_obj_pairs = [k for k in state_map
+                              if k[0] not in active_track_ids
+                              or k[1] not in active_track_ids]
+            for k in lost_obj_pairs:
+                del state_map[k]
+
+        lost_fall = [k for k in self.object_fall_vy_hist if k not in active_track_ids]
+        for k in lost_fall:
+            del self.object_fall_vy_hist[k]

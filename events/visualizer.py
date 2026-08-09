@@ -6,7 +6,7 @@ import config
 class EventVisualizer:
     """Vẽ Visual ROI, Bounding Box, Pose & Banner Alert trực tiếp lên hình ảnh Video."""
 
-    def draw(self, frame, memory_manager, active_events, sensor_alerts=None, camera_id="cam09"):
+    def draw(self, frame, memory_manager, active_events, camera_id="cam09"):
         canvas = frame.copy()
 
         # 1. Vẽ các Polygon ROI
@@ -50,13 +50,13 @@ class EventVisualizer:
         cv2.putText(canvas, f"{camera_id} | {hud}", (10, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1)
 
-        # 3. Gom chung AI Events & Sensor Alerts (dedup: chỉ giữ 1 cảnh báo mỗi loại)
+        # 3. Gom chung AI Events (dedup: chỉ giữ 1 cảnh báo mỗi loại)
         all_alerts = []
         seen_types = set()
 
         # CHỈ vẽ overlay cảnh báo (grid + bbox + banner) khi frame này CÓ sự kiện.
         # Frame không có gì → video sạch, không hiện cảnh báo.
-        has_events = bool(active_events) or bool(sensor_alerts)
+        has_events = bool(active_events)
         if not has_events:
             return canvas
 
@@ -82,6 +82,9 @@ class EventVisualizer:
                     color = (0, 0, 255)  # đỏ cho lửa/khói
                 elif ev["event_type"] == "HUMAN_CONFLICT":
                     color = (0, 0, 255)
+                elif ev["event_type"] in ("VEHICLE_OBJECT_COLLISION",
+                                          "OBJECT_FALLING_ON_VEHICLE"):
+                    color = (255, 0, 255)  # tím cho hành vi/va chạm bổ sung
                 else:
                     color = (0, 165, 255)  # cam cho va chạm/ngã/xâm nhập
                 cv2.rectangle(canvas, (box[0], box[1]), (box[2], box[3]), color, 2)
@@ -99,15 +102,6 @@ class EventVisualizer:
             if ev.get("event_type") not in seen_types:
                 seen_types.add(ev.get("event_type"))
                 all_alerts.append(ev)
-        if sensor_alerts:
-            for sa in sensor_alerts:
-                if sa["event_type"] not in seen_types:
-                    seen_types.add(sa["event_type"])
-                    all_alerts.append({
-                        "event_type": sa["event_type"],
-                        "description": f"[{sa['device_id']}] {sa['description']}",
-                        "confidence": 1.0
-                    })
 
         # 4. Vẽ Banner Cảnh báo phủ lên phía trên Video
         if all_alerts:
