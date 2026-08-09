@@ -5,14 +5,14 @@ Hệ thống giám sát thông minh đô thị: nhận diện sự kiện từ *
 ## Tính năng
 
 - **4 logic phát hiện sự kiện (Rule-based + Temporal Confirm):**
-  - `HUMAN_ACTION` — người ngã (`HUMAN_FALL`), vung tay mạnh (`HUMAN_WILD_GESTURE`), xô xát (`HUMAN_CONFLICT`), va chạm người (`PERSON_COLLISION`)
+  - `HUMAN_ACTION` — người ngã (`HUMAN_FALL`), xô xát (`HUMAN_CONFLICT`), va chạm người (`PERSON_COLLISION`)
   - `VEHICLE_ACCIDENT` — va chạm (`VEHICLE_COLLISION`), dừng bất thường (`VEHICLE_STOP_ANOMALY`)
   - `SMOKE_FIRE` — cháy (`FIRE_DETECTED`), khói (`SMOKE_DETECTED`) bằng phân tích màu HSV + persistence + region growth
   - `INTRUSION` — xâm nhập vùng cấm (`RESTRICTED_INTRUSION`) bằng điểm trong polygon + thời gian lưu lại (dwell)
 - **Detector YOLOv8 + ByteTrack + Pose keypoints** (17 điểm) để phân tích hành vi.
 - **Tracking dự đoán (constant velocity)** giữa các frame detect nhằm giảm tải CPU; chỉ detection thật mới ghi lịch sử kinematics để tránh cảnh báo sai thời điểm.
 - **Cảnh báo cảm biến MQTT** (bất thường điện áp / quá tải) hiển thị chung với alert AI.
-- Chạy **đa luồng**, mỗi camera một thread riêng.
+- Chạy **1 nguồn mỗi lần** (single camera hoặc video local), report riêng cho từng nguồn để không trộn lẫn dữ liệu.
 - Hiển thị ROI, bounding box, HUD đếm object và banner cảnh báo trên video.
 
 ## Cấu trúc dự án
@@ -79,12 +79,27 @@ python -c "from ultralytics import YOLO; YOLO('yolov8n.pt'); YOLO('yolov8n-pose.
 
 ## Chạy
 
+Chạy **riêng từng camera/video** (mỗi lần 1 nguồn, report tách riêng — không trộn kết quả 2 camera vào chung 1 file):
+
 ```bash
+# Chạy stream HLS của 1 camera -> report_cam09.html
+python main_pipeline.py cam09
+
+# Chạy camera khác -> report_cam10.html
+python main_pipeline.py cam10
+
+# Phân tích 1 video local (vẫn áp dụng ROI/rule của cam09) -> report_cam09.html
+python main_pipeline.py cam09 --video path/to/video.mp4
+
+# Tuỳ chọn đường dẫn report riêng
+python main_pipeline.py cam09 --report my_report.html
+
+# Xem danh sách camera / hướng dẫn
 python main_pipeline.py
 ```
 
-- Mỗi cửa sổ hiển thị một camera (`cam09`, `cam10`).
-- Nhấn `q` để thoát, `Ctrl+C` để dừng toàn bộ pipeline.
+- Mỗi lần chạy chỉ xử lý **1 nguồn** duy nhất, kết quả ghi vào report riêng của nguồn đó.
+- Nhấn `q` để thoát, `Ctrl+C` để dừng. Với video local, pipeline tự dừng khi hết video.
 
 ## Cấu hình chính (`config.py`)
 
@@ -99,14 +114,13 @@ python main_pipeline.py
 | `INTRUSION_DWELL_FRAMES` | 5 | Số frame lưu lại trong vùng cấm để xác nhận xâm nhập |
 | `MQTT_*` | — | Broker, topic, user/pass MQTT |
 
-Thay đổi ngưỡng phát hiện (ngã, vung tay, va chạm...) ngay trong `config.py`.
+Thay đổi ngưỡng phát hiện (ngã, xô xát, va chạm...) ngay trong `config.py`.
 
 ## Các event types
 
 | Event | Mô tả |
 |---|---|
 | `HUMAN_FALL` | Người ngã (aspect ratio / torso angle + gia tốc rơi) |
-| `HUMAN_WILD_GESTURE` | Vung tay mạnh (wrist speed từ pose) |
 | `HUMAN_CONFLICT` | Xô xát / giằng co (kinetic + biến thiên khoảng cách) |
 | `PERSON_COLLISION` | 2 người tiếp cận nhanh / va chạm |
 | `VEHICLE_COLLISION` | Va chạm phương tiện (IoU/proximity + giảm tốc/đổi hướng) |

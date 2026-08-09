@@ -1,4 +1,6 @@
+import os
 import time
+import argparse
 import threading
 import numpy as np
 import cv2
@@ -8,16 +10,18 @@ from events.classifier import RuleBasedEventClassifier
 from events.visualizer import EventVisualizer
 from sensors.mqtt_consumer import SensorMQTTConsumer
 from detector import YOLODetector
+from report import ReportManager
 
 
 class CameraWorker(threading.Thread):
     """Worker Thread xử lý riêng từng Camera Stream (HLS/RTSP)."""
 
-    def __init__(self, camera_id, stream_url, sensor_consumer):
+    def __init__(self, camera_id, stream_url, sensor_consumer, report_manager=None):
         super().__init__()
         self.camera_id = camera_id
         self.stream_url = stream_url
         self.sensor_consumer = sensor_consumer
+        self.report = report_manager
         self.memory_mgr = ObjectMemoryManager(maxlen=config.TEMPORAL_BUFFER_MAXLEN)
         self.event_classifier = RuleBasedEventClassifier()
         self.visualizer = EventVisualizer()
@@ -25,10 +29,28 @@ class CameraWorker(threading.Thread):
         self.stopped = False
         self.active_alert_keys = set()
         self.cls_names = {0: "person", 2: "car", 3: "motorbike", 5: "bus", 7: "truck"}
+        self._fps = 0.0
+        self._fps_frames = 0
+        self._fps_t0 = time.time()
+        self._last_report_time = time.time()
+        self._is_file_source = self._looks_like_file(stream_url)
+
+    @staticmethod
+    def _looks_like_file(source):
+        """Phân biệt video local (file path) với stream HLS/RTSP (URL)."""
+        if "://" in source:
+            return False
+        return os.path.exists(source)
+
+    def _open_capture(self):
+        if self._is_file_source:
+            return cv2.VideoCapture(self.stream_url)
+        return cv2.VideoCapture(self.stream_url, cv2.CAP_FFMPEG)
 
     def run(self):
-        print(f"[{self.camera_id}] Connecting to stream: {self.stream_url}")
-        cap = cv2.VideoCapture(self.stream_url, cv2.CAP_FFMPEG)
+        print(f"[{self.camera_id}] Source: {self.stream_url}"
+              + (" (video local)" if self._is_file_source else " (HLS/RTSP stream)"))
+        cap = self._open_capture()
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
         window_name = f"SmartVision AI Engine - {self.camera_id}"
@@ -39,7 +61,12 @@ class CameraWorker(threading.Thread):
         while not self.stopped and cap.isOpened():
             ret, frame = cap.read()
             if not ret or frame is None:
+                if self._is_file_source:
+                    print(f"[{self.camera_id}] Hết video / không đọc được frame. Dừng xử lý.")
+                    break
                 print(f"[{self.camera_id}] Stream drop or buffering... Retrying in 1s")
+                if self.report:
+                    self.report.update_camera(self.camera_id, online=False, frame_idx=frame_idx)
                 time.sleep(1.0)
                 cap.open(self.stream_url, cv2.CAP_FFMPEG)
                 continue
@@ -66,11 +93,42 @@ class CameraWorker(threading.Thread):
             self.memory_mgr.update_tracks(active_tracks, frame_idx, timestamp)
 
             # Step 4: Evaluate AI Vision Events
-            events = self.event_classifier.evaluate(self.camera_id, self.memory_mgr, frame_resized)
+            # Object-based rules chỉ chạy trên DETECTION frame (is_detection_frame=True),
+            # smoke/fire chạy mọi frame. Tránh đếm trùng confirm counter trên predicted frame.
+            events = self.event_classifier.evaluate(
+                self.camera_id,
+                self.memory_mgr,
+                frame_resized,
+                is_detection_frame=(frame_idx % config.DETECTION_INTERVAL == 0),
+                frame_idx=frame_idx,
+            )
             self._log_events(events)
 
             # Step 5: Lấy Sensor Alerts từ MQTT Consumer
             sensor_alerts = self.sensor_consumer.get_latest_alerts()
+
+            # Step 5b: Cập nhật dữ liệu báo cáo & sinh HTML dashboard định kỳ
+            if self.report:
+                self.report.record_events(self.camera_id, events)
+                if sensor_alerts:
+                    self.report.record_events(self.camera_id, sensor_alerts)
+
+                now = time.time()
+                self._fps_frames += 1
+                if now - self._fps_t0 >= 1.0:
+                    self._fps = self._fps_frames / max(now - self._fps_t0, 1e-5)
+                    self._fps_t0 = now
+                    self._fps_frames = 0
+
+                counts = {}
+                for obj in self.memory_mgr.visible_objects().values():
+                    counts[obj.cls_id] = counts.get(obj.cls_id, 0) + 1
+                self.report.update_camera(self.camera_id, online=True, fps=self._fps,
+                                          frame_idx=frame_idx, counts=counts)
+
+                if now - self._last_report_time >= 2.0:
+                    self.report.save()
+                    self._last_report_time = now
 
             # Step 6: Visual Overlay trực tiếp lên Video
             annotated_frame = self.visualizer.draw(
@@ -90,6 +148,9 @@ class CameraWorker(threading.Thread):
 
         cap.release()
         cv2.destroyWindow(window_name)
+        if self.report:
+            self.report.update_camera(self.camera_id, online=False, frame_idx=frame_idx)
+            self.report.save()
 
     def _log_events(self, events):
         """Log alert khi event lần đầu được xác nhận (tránh spam lặp mỗi frame)."""
@@ -139,28 +200,73 @@ class CameraWorker(threading.Thread):
 
 def main():
     print("============================================================")
-    print(" SMARTVISION AI ENGINE - MULTI-STREAM & SENSOR INTEGRATION")
+    print(" SMARTVISION AI ENGINE - SINGLE SOURCE PER RUN")
     print("============================================================")
+
+    parser = argparse.ArgumentParser(
+        description="SmartVision AI - xử lý 1 camera/video tại một thời điểm, "
+                    "kết quả ghi riêng từng report (không trộn lẫn camera)."
+    )
+    parser.add_argument(
+        "camera_id",
+        nargs="?",
+        help="ID camera cần chạy (ví dụ: cam09). Xem danh sách trong config.CAMERA_STREAMS.",
+    )
+    parser.add_argument(
+        "--video",
+        default=None,
+        help="Đường dẫn video local để phân tích (nếu không có, dùng stream HLS của camera).",
+    )
+    parser.add_argument(
+        "--report",
+        default=None,
+        help="Đường dẫn file report (mặc định: report_{camera_id}.html).",
+    )
+    args = parser.parse_args()
+
+    if not args.camera_id:
+        print("[SYSTEM] Chưa chọn camera. Chạy riêng từng camera (mỗi lần 1 nguồn):")
+        for cid in config.CAMERA_STREAMS:
+            print(f"    python main_pipeline.py {cid}")
+        print("[SYSTEM] Hoặc phân tích 1 video local bằng camera config nào đó:")
+        print("    python main_pipeline.py cam09 --video path/to/video.mp4")
+        return
+
+    if args.camera_id not in config.CAMERA_STREAMS:
+        print(f"[SYSTEM] Không tìm thấy camera '{args.camera_id}'. "
+              f"Các camera có sẵn: {list(config.CAMERA_STREAMS.keys())}")
+        return
+
+    if args.video and not os.path.exists(args.video):
+        print(f"[SYSTEM] Không tìm thấy file video: {args.video}")
+        return
+
+    # Report RIÊNG cho camera đang chạy -> không trộn event của camera khác
+    report_path = args.report or f"report_{args.camera_id}.html"
+    source = args.video or config.CAMERA_STREAMS[args.camera_id]
 
     # 1. Khởi chạy Sensor MQTT Consumer
     sensor_consumer = SensorMQTTConsumer()
     sensor_consumer.start()
 
-    # 2. Khởi chạy đồng thời 2 luồng Camera: Cam09 & Cam10
-    workers = []
-    for cam_id, url in config.CAMERA_STREAMS.items():
-        worker = CameraWorker(cam_id, url, sensor_consumer)
-        worker.daemon = True
-        worker.start()
-        workers.append(worker)
+    # 2. Khởi chạy DUY NHẤT worker của camera được chọn
+    report = ReportManager(report_path)
+    report.register_camera(args.camera_id)
+
+    worker = CameraWorker(args.camera_id, source, sensor_consumer, report_manager=report)
+    worker.daemon = True
+    worker.start()
 
     try:
-        while any(w.is_alive() for w in workers):
+        while worker.is_alive():
             time.sleep(0.5)
     except KeyboardInterrupt:
         print("[SYSTEM] Stopping pipeline...")
-        for w in workers:
-            w.stopped = True
+        worker.stopped = True
+    finally:
+        report.save()
+        print(f"[REPORT] Dashboard saved to {report.report_path} "
+              f"(mở file trong trình duyệt để xem kết quả của {args.camera_id})")
 
 
 if __name__ == "__main__":

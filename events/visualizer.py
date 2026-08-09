@@ -50,15 +50,22 @@ class EventVisualizer:
         cv2.putText(canvas, f"{camera_id} | {hud}", (10, 25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 1)
 
-        # 3. Gom chung AI Events & Sensor Alerts
-        all_alerts = list(active_events)
+        # 3. Gom chung AI Events & Sensor Alerts (dedup: chỉ giữ 1 cảnh báo mỗi loại)
+        all_alerts = []
+        seen_types = set()
+        for ev in list(active_events):
+            if ev.get("event_type") not in seen_types:
+                seen_types.add(ev.get("event_type"))
+                all_alerts.append(ev)
         if sensor_alerts:
             for sa in sensor_alerts:
-                all_alerts.append({
-                    "event_type": sa["event_type"],
-                    "description": f"[{sa['device_id']}] {sa['description']}",
-                    "confidence": 1.0
-                })
+                if sa["event_type"] not in seen_types:
+                    seen_types.add(sa["event_type"])
+                    all_alerts.append({
+                        "event_type": sa["event_type"],
+                        "description": f"[{sa['device_id']}] {sa['description']}",
+                        "confidence": 1.0
+                    })
 
         # 4. Vẽ Banner Cảnh báo phủ lên phía trên Video
         if all_alerts:
