@@ -27,7 +27,13 @@ class CameraWorker(threading.Thread):
         self.detector = YOLODetector()
         self.stopped = False
         self.active_alert_keys = set()
-        self.cls_names = {0: "person", 2: "car", 3: "motorbike", 5: "bus", 7: "truck"}
+        self.cls_names = {
+            0: "person",
+            2: "car",
+            3: "motorbike",
+            5: "bus",
+            7: "construction_vehicle/truck",
+        }
         self._is_file_source = self._looks_like_file(stream_url)
 
     @staticmethod
@@ -205,17 +211,24 @@ def main():
         action="store_true",
         help="Chạy không cửa sổ video: chỉ log cảnh báo + chụp snapshot vị trí cảnh báo.",
     )
+    parser.add_argument(
+        "--all-cameras",
+        action="store_true",
+        help="Chạy song song tất cả camera trong config.CAMERA_STREAMS.",
+    )
     args = parser.parse_args()
 
-    if not args.camera_id:
+    if not args.camera_id and not args.all_cameras:
         print("[SYSTEM] Chưa chọn camera. Chạy riêng từng camera (mỗi lần 1 nguồn):")
         for cid in config.CAMERA_STREAMS:
             print(f"    python main.py {cid}")
         print("[SYSTEM] Hoặc phân tích 1 video local bằng camera config nào đó:")
         print("    python main.py cam09 --video path/to/video.mp4")
+        print("[SYSTEM] Hoặc chạy tất cả camera song song:")
+        print("    python main.py --all-cameras")
         return
 
-    if args.camera_id not in config.CAMERA_STREAMS:
+    if args.camera_id and args.camera_id not in config.CAMERA_STREAMS:
         print(f"[SYSTEM] Không tìm thấy camera '{args.camera_id}'. "
               f"Các camera có sẵn: {list(config.CAMERA_STREAMS.keys())}")
         return
@@ -224,7 +237,7 @@ def main():
         print(f"[SYSTEM] Không tìm thấy file video: {args.video}")
         return
 
-    source = args.video or config.CAMERA_STREAMS[args.camera_id]
+    source = None if args.all_cameras else (args.video or config.CAMERA_STREAMS[args.camera_id])
 
     # Bật headless mode qua CLI (ghi đè config)
     if args.headless:
@@ -237,17 +250,27 @@ def main():
     )
     start_dashboard(alert_store, config.SNAPSHOT_DIR, enabled=config.DASHBOARD_ENABLED)
 
-    # 2. Khởi chạy DUY NHẤT worker của camera được chọn
-    worker = CameraWorker(args.camera_id, source, alert_store=alert_store)
-    worker.daemon = True
-    worker.start()
+    workers = []
+    if args.all_cameras:
+        for cid, stream_url in config.CAMERA_STREAMS.items():
+            worker = CameraWorker(cid, stream_url, alert_store=alert_store)
+            worker.daemon = True
+            worker.start()
+            workers.append(worker)
+    else:
+        # 2. Khởi chạy DUY NHẤT worker của camera được chọn
+        worker = CameraWorker(args.camera_id, source, alert_store=alert_store)
+        worker.daemon = True
+        worker.start()
+        workers.append(worker)
 
     try:
-        while worker.is_alive():
+        while any(w.is_alive() for w in workers):
             time.sleep(0.5)
     except KeyboardInterrupt:
         print("[SYSTEM] Stopping pipeline...")
-        worker.stopped = True
+        for worker in workers:
+            worker.stopped = True
 
 
 if __name__ == "__main__":

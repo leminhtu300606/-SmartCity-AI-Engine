@@ -5,9 +5,15 @@ import config
 class VehicleAccidentRules:
     """Phát hiện va chạm xe bằng Accident Classifier (multi-feature).
 
-    Pipeline:
-      Camera → Object Detection → Vehicle Tracking → Trajectory/Speed/Distance
-      → Collision Feature Extraction → Accident Classifier → Có/Không va chạm
+    Pipeline 2 GIAI ĐOẠN RÕ RÀNG:
+      Stage 1 — XÁC ĐỊNH PHƯƠNG TIỆN + TÌNH TRẠNG của từng xe:
+         a) Tilt  : góc nghiêng/lật — aspect ratio bbox lệch khỏi baseline ổn
+                    định riêng của xe + đổi hướng đột ngột + đứng yên.
+         b) Crush : xe bị vật thể/người khác PHỦ >= ngưỡng diện tích (đè lên).
+         c) Impact: giảm tốc / dừng đột ngột / đổi hướng — động học va chạm.
+      Stage 2 — KẾT LUẬN TAI NẠN chỉ khi có tình trạng bất thường + proximity:
+         - Với mỗi cặp xe: kết hợp proximity + các tín hiệu tình trạng ở Stage 1
+           (closing, decel, tilt, dir change) → điểm tổng hợp → va chạm.
 
     Các đặc trưng:
       1. Proximity  : 2 xe tiến rất gần / bounding box giao nhau (gate bắt buộc).
@@ -15,7 +21,8 @@ class VehicleAccidentRules:
       3. Dist drop  : khoảng cách tụt nhanh frame-to-frame.
       4. Direction  : hướng/chuyển động thay đổi đột ngột.
       5. Decel      : giảm tốc đột ngột.
-      6. Post-contact: 1 xe dừng hoặc đổi hướng bất thường NGAY SAU tiếp xúc.
+      6. Tilt       : TÌNH TRẠNG nghiêng/lật của xe (aspect ratio bất thường).
+      7. Post-contact: 1 xe dừng hoặc đổi hướng bất thường NGAY SAU tiếp xúc.
 
     KHÔNG chỉ dựa vào bbox overlap: xe chạy sát nhau / bị che khuất cũng tạo
     overlap giả → proximity là điều kiện cần nhưng CHƯA đủ; phải kèm các đặc
@@ -26,6 +33,8 @@ class VehicleAccidentRules:
         # Temporal state cho sustained confirmation
         self.collision_state = {}     # (min_id, max_id) -> sustained_count
         self.hard_stop_state = {}     # track_id -> sustained_count
+        self.vehicle_state = {}       # track_id -> sustained_count (nghiêng/lật)
+        self.crush_state = {}         # (min_id, max_id) -> sustained_count (bị đè)
         self.pair_dist_hist = {}      # (min_id, max_id) -> deque(distances)
         self.pair_contact_frame = {}  # (min_id, max_id) -> frame gần nhất đạt proximity
 
@@ -35,7 +44,7 @@ class VehicleAccidentRules:
         self.object_fall_vy_hist = {}      # track_id -> [vy_norm, ...] quỹ đạo rơi
 
     def check_collision(self, objA, objB):
-        """Accident Classifier: trích xuất đặc trưng -> chấm điểm -> quyết định."""
+        """Accident Classifier: xác định tình trạng xe (Stage 1) -> chấm điểm (Stage 2)."""
         if len(objA.bbox_history) < 3 or len(objB.bbox_history) < 3:
             return False, 0.0
 
@@ -44,8 +53,16 @@ class VehicleAccidentRules:
                     max(objA.track_id, objB.track_id))
 
         # ------------------------------------------------------------
+        # STAGE 1: XÁC ĐỊNH PHƯƠNG TIỆN + TÌNH TRẠNG của từng xe
+        # Đánh giá TÌNH TRẠNG mỗi xe TRƯỚC: nghiêng/lật (tilt), giảm tốc,
+        # dừng đột ngột, đổi hướng. Kết quả Stage 1 dùng cho Stage 2.
+        # ------------------------------------------------------------
+        condA = self._assess_vehicle_condition(objA)
+        condB = self._assess_vehicle_condition(objB)
+
+        # ------------------------------------------------------------
         # FEATURE 1: Proximity — 2 xe tiến rất gần / bbox giao nhau
-        # Chuẩn hóa theo đường chéo trung bình (không dùng pixel tuyệt đối).
+        # Chuẩn hóa theo đường chéo  trung bình (không dùng pixel tuyệt đối).
         # ------------------------------------------------------------
         diagA = np.sqrt((boxA[2] - boxA[0]) ** 2 + (boxA[3] - boxA[1]) ** 2)
         diagB = np.sqrt((boxB[2] - boxB[0]) ** 2 + (boxB[3] - boxB[1]) ** 2)
@@ -75,33 +92,20 @@ class VehicleAccidentRules:
         dist_drop_score = min(1.0, dist_drop / config.VEHICLE_DIST_DROP_THRESH)
 
         # ------------------------------------------------------------
-        # FEATURE 4: Direction change — đổi hướng / chuyển động đột ngột
+        # FEATURES 4-6: TÌNH TRẠNG xe từ Stage 1 (tilt + direction + decel)
         # ------------------------------------------------------------
-        dir_changeA = self._get_direction_change(objA)
-        dir_changeB = self._get_direction_change(objB)
         direction_score = max(
-            min(1.0, dir_changeA / config.VEHICLE_DIR_CHANGE_THRESH),
-            min(1.0, dir_changeB / config.VEHICLE_DIR_CHANGE_THRESH),
+            min(1.0, condA["dir_change"] / config.VEHICLE_DIR_CHANGE_THRESH),
+            min(1.0, condB["dir_change"] / config.VEHICLE_DIR_CHANGE_THRESH),
         )
 
-        # ------------------------------------------------------------
-        # FEATURE 5: Deceleration — giảm tốc đột ngột
-        # ------------------------------------------------------------
-        decelA = self._get_deceleration(objA)
-        decelB = self._get_deceleration(objB)
-        decel_score = max(
-            min(1.0, decelA / config.VEHICLE_DECEL_THRESH),
-            min(1.0, decelB / config.VEHICLE_DECEL_THRESH),
-        )
+        impact_score = max(condA["impact"], condB["impact"])
 
-        # "Dừng đột ngột": vận tốc tức thời nhảy về ~0 trong 1 frame (va chạm
-        # mạnh) làm _get_deceleration trả 0 (vel≈0 bị bỏ qua). Bắt tín hiệu này
-        # từ lịch sử vận tốc: trước đó chạy nhanh, bây giờ đứng yên.
-        sharp_stop = max(self._get_sharp_stop(objA), self._get_sharp_stop(objB))
-        impact_score = max(decel_score, sharp_stop)
+        # TÌNH TRẠNG nghiêng/lật: aspect ratio bất thường so với baseline riêng
+        tilt_score = max(condA["tilt"], condB["tilt"])
 
         # ------------------------------------------------------------
-        # FEATURE 6: Post-contact — dừng/đổi hướng bất thường sau TIẾP XÚC THẬT
+        # FEATURE 7: Post-contact — dừng/đổi hướng bất thường sau TIẾP XÚC THẬT
         # ------------------------------------------------------------
         # CHỈ arm cửa sổ hậu va chạm khi bbox 2 xe THỰC SỰ chồng lên nhau
         # (overlap), KHÔNG phải chỉ "gần nhau". Xe chạy sát / vượt gần nhau không
@@ -110,11 +114,11 @@ class VehicleAccidentRules:
         has_overlap = iou > config.VEHICLE_IOU_THRESH
         self._update_contact_frame(pair_key, has_overlap)
         post_contact_score = self._get_post_contact_anomaly(
-            pair_key, objA, objB, dir_changeA, dir_changeB
+            pair_key, objA, objB, condA["dir_change"], condB["dir_change"]
         )
 
         # ------------------------------------------------------------
-        # ACCIDENT CLASSIFIER: điểm tổng hợp có trọng số
+        # STAGE 2: ACCIDENT CLASSIFIER — điểm tổng hợp có trọng số
         # ------------------------------------------------------------
         w = config.VEHICLE_COLLISION_WEIGHTS
         score = (
@@ -123,13 +127,14 @@ class VehicleAccidentRules:
             + w["dist_drop"] * dist_drop_score
             + w["direction"] * direction_score
             + w["decel"] * impact_score
+            + w["tilt"] * tilt_score
             + w["post_contact"] * post_contact_score
         )
 
         # Gate bắt buộc: phải gần nhau (proximity là điều kiện cần) + phải có
         # TÍN HIỆU ĐỘNG HỌC thật. Xe đậu sát nhau / đi song song (closing≈0,
         # decel≈0) → KHÔNG phải va chạm dù bbox rất gần.
-        kinetic_signal = max(closing_score, impact_score)
+        kinetic_signal = max(closing_score, impact_score, tilt_score)
         has_kinetic = kinetic_signal > config.VEHICLE_COLLISION_MIN_KINETIC
 
         is_proximate_candidate = (is_proximate and has_kinetic
@@ -238,7 +243,7 @@ class VehicleAccidentRules:
 
         # Gate: phải gần nhau + có tín hiệu động học thật (siết chặt hơn 0.15)
         kinetic_signal = max(closing_score, decel_score, speedO_score, sharp_stop)
-        has_kinetic = kinetic_signal > 0.25
+        has_kinetic = kinetic_signal > 0.30
 
         is_candidate = (is_proximate and has_kinetic
                         and score > config.VEHICLE_OBJECT_SCORE_THRESH)
@@ -357,8 +362,160 @@ class VehicleAccidentRules:
                 >= config.VEHICLE_HARD_STOP_SUSTAINED)
 
     # ----------------------------------------------------------------
+    # STAGE 1: XÁC ĐỊNH PHƯƠNG TIỆN + TÌNH TRẠNG (single vehicle)
+    # ----------------------------------------------------------------
+
+    def check_vehicle_state(self, obj):
+        """Xe bị NGHIÊNG/LẬT (VEHICLE_ACCIDENT) — xác định tình trạng trước.
+
+        Stage 1: xác định xe có TÌNH TRẠNG bất thường không:
+          - Aspect ratio bbox lệch khỏi baseline ổn định riêng của xe
+            (góc nghiêng/lật thay đổi hình dạng bbox).
+          - Kèm đổi hướng đột ngột (không phải quẹo bình thường).
+          - Xe đứng yên hoặc rất chậm (đã dừng sau khi lật).
+        Stage 2: nếu tình trạng nghiêng/lật duy trì >= VEHICLE_TILT_SUSTAINED
+        frame → kết luận tai nạn xe đơn (không cần xe thứ 2).
+        """
+        if len(obj.bbox_history) < 6:
+            return False, 0.0
+
+        cond = self._assess_vehicle_condition(obj)
+
+        is_candidate = (cond["tilt"] > config.VEHICLE_TILT_SCORE_THRESH
+                        and cond["dir_change"] > config.VEHICLE_TILT_DIR_CHANGE_THRESH
+                        and cond["stopped"])
+
+        tid = obj.track_id
+        if is_candidate:
+            self.vehicle_state[tid] = min(
+                config.VEHICLE_TILT_SUSTAINED + 2,
+                self.vehicle_state.get(tid, 0) + 1,
+            )
+        else:
+            self.vehicle_state[tid] = max(0, self.vehicle_state.get(tid, 0) - 1)
+
+        is_confirmed = (is_candidate
+                        and self.vehicle_state.get(tid, 0)
+                        >= config.VEHICLE_TILT_SUSTAINED)
+
+        # Điểm: tình trạng nghiêng/lật (0.5) + độ lệch aspect (tối đa 0.5)
+        score = 0.5 + min(cond["tilt"] * 0.5, 0.45)
+        return is_confirmed, min(score, 0.95)
+
+    def check_crushed(self, objV, objO):
+        """Xe bị vật thể/người khác ĐÈ/va phải mạnh (crush).
+
+        Stage 1: xác định xe bị "đè" — bbox đối tượng khác PHỦ >= ngưỡng diện
+        tích bbox xe (xe chở hàng/người che bbox cũng có thể trùng → cần xe
+        ĐỨNG YÊN để phân biệt xe đang đi bị vật phủ lúc lướt qua).
+        Stage 2: duy trì bị đè >= VEHICLE_CRUSH_SUSTAINED frame → kết luận.
+        """
+        if len(objV.bbox_history) < 3 or len(objO.bbox_history) < 3:
+            return False, 0.0
+
+        boxV = objV.bbox_history[-1]
+        boxO = objO.bbox_history[-1]
+        pair_key = (min(objV.track_id, objO.track_id),
+                    max(objV.track_id, objO.track_id))
+
+        coverage = self._coverage_ratio(boxV, boxO)
+        cond = self._assess_vehicle_condition(objV)
+
+        # Điểm: mức phủ (0.5) + tình trạng xe (impact/stopped, tối đa 0.45)
+        score = min(0.95, 0.5 + min(coverage * 0.7, 0.35) + cond["impact"] * 0.1)
+
+        is_candidate = (coverage > config.VEHICLE_CRUSH_COVERAGE_THRESH
+                        and cond["stopped"]
+                        and score >= config.VEHICLE_CRUSH_SCORE_THRESH)
+
+        if is_candidate:
+            self.crush_state[pair_key] = min(
+                config.VEHICLE_CRUSH_SUSTAINED + 2,
+                self.crush_state.get(pair_key, 0) + 1,
+            )
+        else:
+            self.crush_state[pair_key] = max(
+                0, self.crush_state.get(pair_key, 0) - 1
+            )
+
+        is_confirmed = (is_candidate
+                        and self.crush_state.get(pair_key, 0)
+                        >= config.VEHICLE_CRUSH_SUSTAINED)
+        return is_confirmed, score
+
+    # ----------------------------------------------------------------
     # Helper Methods
     # ----------------------------------------------------------------
+
+    def _assess_vehicle_condition(self, obj):
+        """STAGE 1: Đánh giá TÌNH TRẠNG của một xe (không phụ thuộc xe khác).
+
+        Trả về dict:
+          tilt      : mức nghiêng/lật 0..1 (aspect ratio lệch baseline)
+          dir_change: đổi hướng đột ngột (radians)
+          decel     : giảm tốc đột ngột 0..1
+          sharp_stop: dừng đột ngột 0..1
+          impact    : max(decel, sharp_stop)
+          stopped   : xe đứng yên / rất chậm
+        """
+        tilt = self._get_tilt_score(obj)
+        dir_change = self._get_direction_change(obj)
+        decel = self._get_deceleration(obj)
+        sharp_stop = self._get_sharp_stop(obj)
+        speed = float(np.linalg.norm(obj.velocity_history[-1])) \
+            if len(obj.velocity_history) else 0.0
+        # impact chuẩn hóa về 0..1: decel thô chia ngưỡng VEHICLE_DECEL_THRESH
+        # (decel px/frame^2 có thể rất lớn nếu không cap → vượt khỏi 0..1).
+        impact = min(1.0, max(decel / config.VEHICLE_DECEL_THRESH, sharp_stop))
+        return {
+            "tilt": tilt,
+            "dir_change": dir_change,
+            "decel": decel,
+            "sharp_stop": sharp_stop,
+            "impact": impact,
+            "stopped": speed < config.VEHICLE_TILT_SPEED_LOW,
+        }
+
+    def _get_tilt_score(self, obj):
+        """Mức nghiêng/lật từ sự lệch aspect ratio so với baseline ổn định.
+
+        Xe bình thường giữ aspect ratio khá ổn định quanh 1 giá trị trung bình
+        (baseline riêng của từng xe). Khi xe NGHIÊNG/LẬT, bbox trở nên dẹt theo
+        trục khác → aspect ratio lệch mạnh khỏi baseline.
+        Baseline = trung vị aspect ở NỬA ĐẦU cửa sổ (cũ hơn) — phần xe còn ở
+        tư thế bình thường; so sánh với aspect hiện tại.
+        """
+        if len(obj.bbox_history) < 6:
+            return 0.0
+        window = min(8, len(obj.bbox_history))
+        aspects = []
+        for box in list(obj.bbox_history)[-window:]:
+            w = box[2] - box[0]
+            h = box[3] - box[1]
+            if h < 1e-5:
+                continue
+            aspects.append(w / h)
+        if not aspects:
+            return 0.0
+
+        # Baseline = nửa đầu cửa sổ (tư thế bình thường trước khi lật)
+        half = max(1, len(aspects) // 2)
+        baseline = float(np.median(aspects[:half]))
+        current = aspects[-1]
+        if baseline < 1e-5:
+            return 0.0
+        deviation = abs(current - baseline) / baseline
+        return min(1.0, deviation / config.VEHICLE_TILT_ASPECT_RATIO_DEVIATION)
+
+    def _coverage_ratio(self, boxV, boxO):
+        """Tỷ lệ diện tích bbox xe bị bbox đối tượng khác phủ lên."""
+        xA = max(boxV[0], boxO[0])
+        yA = max(boxV[1], boxO[1])
+        xB = min(boxV[2], boxO[2])
+        yB = min(boxV[3], boxO[3])
+        inter = max(0, xB - xA) * max(0, yB - yA)
+        areaV = (boxV[2] - boxV[0]) * (boxV[3] - boxV[1])
+        return inter / max(areaV, 1e-5)
 
     def _get_dist_drop(self, pair_key, current_dist):
         """Độ tụt khoảng cách frame-to-frame (px) — bắt 'tiến lại nhanh'."""
@@ -533,6 +690,17 @@ class VehicleAccidentRules:
         lost_singles = [k for k in self.hard_stop_state if k not in active_track_ids]
         for k in lost_singles:
             del self.hard_stop_state[k]
+
+        # Single-vehicle tilt state
+        lost_vehicle_state = [k for k in self.vehicle_state if k not in active_track_ids]
+        for k in lost_vehicle_state:
+            del self.vehicle_state[k]
+
+        # Crush (bị đè) state — dùng chung logic pair với collision
+        lost_crush = [k for k in self.crush_state
+                      if k[0] not in active_track_ids or k[1] not in active_track_ids]
+        for k in lost_crush:
+            del self.crush_state[k]
 
         for k in lost_pairs:
             self.pair_dist_hist.pop(k, None)

@@ -16,6 +16,7 @@ class PersonActionRules:
         # Temporal state cho sustained pairwise detection
         self.conflict_state = {}  # (min_id, max_id) -> sustained_count
         self.collision_state = {}  # (min_id, max_id) -> sustained_count
+        self.group_conflict_state = {}  # (id1, id2, id3) -> sustained_count
 
     def check_fall(self, obj):
         """Phát hiện người ngã qua Aspect Ratio, Torso Angle & Gia tốc rơi.
@@ -69,19 +70,30 @@ class PersonActionRules:
         return obj.fall_persist_count >= config.FALL_PERSIST_FRAMES
 
     def check_conflict(self, objA, objB):
-        """Phát hiện 2 người xô xát/giằng co/đánh nhau — bộ quyết định 2 đường.
+        """Phát hiện 2 người xô xát/giằng co/đánh nhau — Pipeline 2 GIAI ĐOẠN.
 
-        KHÔNG coi "nhiều người trong khung hình" là đánh nhau. Phải có HÀNH VI
-        thật sự:
-          - Đám đông đứng nói chuyện / đi chung: gần nhau NHƯNG không ai vung
-            tay nhanh và không ai cử động giật cục mạnh → loại.
-          - Một người chạy ngang / vẫy tay gần người khác: chỉ 1 người động,
-            người kia không phản ứng, khoảng cách ổn định → loại.
+        STAGE 1: XÁC ĐỊNH NGƯỜI + đánh giá TÌNH TRẠNG của từng người:
+          - Biên độ vung tay (wrist amplitude): cổ tay vung XA bao nhiêu.
+          - Tốc độ cổ tay (wrist speed): vung NHANH như thế nào.
+          - Tăng tốc đột ngột (sudden accel): lao tới / giật người.
+          - Tư thế nằm vật nhau (lying): 1 người bị quật ngã/đè xuống.
+          - Độ giật cục (jitter): cử động giật cục mạnh.
+        STAGE 2: KẾT LUẬN XÔ XÁT CHỈ KHI có TÌNH TRẠNG BẤT THƯỜNG + gần nhau.
 
-        ĐƯỜNG A (Pose): 1 người vung cổ tay RẤT nhanh (đấm/đánh) + gần nhau +
+        LOẠI BỎ "ở sát nhau": 2 người đứng nói chuyện / ôm nhau / đứng chờ,
+        gần nhau NHƯNG cả hai đều bình thường (không vung tay, không giật,
+        không tăng tốc, không nằm) → KHÔNG phải xô xát dù khoảng cách rất gần.
+
+        ĐƯỜNG A (Pose): 1 người vung cổ tay nhanh hoặc biên độ lớn + gần nhau +
         (người kia cũng động HOẶC khoảng cách dao động).
-        ĐƯỜNG B (BBox fallback): CẢ HAI đều cử động giật cục mạnh VÀ khoảng
-        cách dao động mạnh (giằng co lúc gần lúc xa).
+        ĐƯỜNG B (BBox fallback): CẢ HAI đều cử động giật cục mạnh.
+        ĐƯỜNG C (Grapple/nằm vật): 2 người chồng bbox + (giằng co HOẶC tư thế nằm).
+        ĐƯỜNG D (Một chiều): 1 người kích động cực mạnh hoặc tăng tốc đột ngột
+        khi rất gần người kia.
+        ĐƯỜNG E (Người ngã trong cặp): 1 người ngã + KẾT HỢP thêm bằng chứng
+        xô xát (người kia bất thường, bbox chồng nhau, khoảng cách dao động,
+        hoặc tăng tốc đột ngột). Chỉ "đứng gần nhau + có người ngã" thì KHÔNG
+        tính là đánh nhau.
         """
         if len(objA.bbox_history) < 5 or len(objB.bbox_history) < 5:
             return False, 0.0
@@ -107,16 +119,35 @@ class PersonActionRules:
             return False, 0.0
 
         # ============================================================
-        # ĐẶC TRƯNG: cử động của TỪNG người
+        # GATE: CÙNG Ô LƯỚI (grid zone)
+        # 2 người phải thuộc CÙNG 1 ô lưới trong frame (tâm bbox nằm cùng
+        # vùng). Khác ô = 2 khu vực xa nhau trong khung hình → không xét
+        # xô xát dù khoảng cách tương đối (theo chiều cao) vẫn dưới ngưỡng.
         # ============================================================
-        wrist_A = self._get_wrist_speed(objA)
-        wrist_B = self._get_wrist_speed(objB)
-        jitter_A = self._get_bbox_jitter(objA)
-        jitter_B = self._get_bbox_jitter(objB)
+        if config.grid_zone(*centA) != config.grid_zone(*centB):
+            self.conflict_state[pair_key] = max(
+                0, self.conflict_state.get(pair_key, 0) - 1
+            )
+            return False, 0.0
+
+        # ============================================================
+        # STAGE 1: XÁC ĐỊNH NGƯỜI + TÌNH TRẠNG của TỪNG người
+        # ============================================================
+        condA = self._assess_person_condition(objA)
+        condB = self._assess_person_condition(objB)
+
+        # ============================================================
+        # LOẠI BỎ "ở sát nhau": CẢ HAI đều bình thường -> không xô xát
+        # ============================================================
+        if not (condA["abnormal"] or condB["abnormal"]):
+            self.conflict_state[pair_key] = max(
+                0, self.conflict_state.get(pair_key, 0) - 1
+            )
+            return False, 0.0
 
         # Độ kích động của mỗi người = max(wrist speed, bbox jitter)
-        agitation_A = max(wrist_A, jitter_A)
-        agitation_B = max(wrist_B, jitter_B)
+        agitation_A = max(condA["wrist_speed"], condA["jitter"])
+        agitation_B = max(condB["wrist_speed"], condB["jitter"])
         mutual_agitation = min(agitation_A, agitation_B)
 
         # ============================================================
@@ -139,33 +170,28 @@ class PersonActionRules:
         bbox_iou = self._calculate_iou(boxA, boxB)
 
         # ============================================================
-        # QUYẾT ĐỊNH 3 ĐƯỜNG
+        # STAGE 2: QUYẾT ĐỊNH — kết hợp tình trạng cá nhân (Stage 1)
         # ============================================================
-        # Đường A — Pose: có người vung cổ tay nhanh (đấm/đánh)
-        pose_punch = (max(wrist_A, wrist_B) > config.CONFLICT_WRIST_HIGH_THRESH)
+        # Đường A — Pose: vung cổ tay nhanh (speed) HOẶC biên độ lớn (amp)
+        pose_punch = (
+            max(condA["wrist_speed"], condB["wrist_speed"])
+            > config.CONFLICT_WRIST_HIGH_THRESH
+            or max(condA["wrist_amplitude"], condB["wrist_amplitude"])
+            > config.CONFLICT_WRIST_AMPLITUDE_THRESH
+        )
 
         # Đường B — BBox: CẢ HAI người cử động giật cục rất mạnh.
-        # Jitter cao (>= 12) chỉ đạt khi thực sự giằng co/đánh nhau; người đi
-        # lại bình thường chỉ ~7. Giằng co sát nhau có khoảng cách ổn định
-        # nên không dùng oscillation làm điều kiện bắt buộc.
-        both_jittery = (min(jitter_A, jitter_B)
+        both_jittery = (min(condA["jitter"], condB["jitter"])
                         > config.CONFLICT_BBOX_JITTER_THRESH)
 
-        # Đường C — Grapple (vật lộn tại chỗ): 2 người dính sát, bbox chồng
-        # nhau (IoU cao) + ít nhất 1 người giằng co đáng kể. Đây là kiểu xô
-        # xát "bế/ôm/quật" mà 1 người bị khống chế có thể gần như đứng yên
-        # (jitter thấp) — không đạt signal_mutual của đường A/B.
-        # Phân biệt:
-        #   - Ôm nhau/nói chuyện: cả 2 gần như đứng yên (jitter ≈ 0) → không
-        #     đạt grapple_activity.
-        #   - Đi ngang/đứng gần: 2 bbox không chồng nhiều (IoU thấp) → không
-        #     đạt grapple_overlap.
-        #   - Đám đông chen lấn thoáng qua: IoU thấp (bbox cạnh nhau).
-        # IoU_THRESH để cao để chỉ bắt khi 2 người thực sự CHỒNG VÀO nhau.
+        # Đường C — Grapple (vật lộn tại chỗ / nằm vật nhau): 2 người dính sát,
+        # bbox chồng nhau (IoU cao) + (1 người giằng co đáng kể HOẶC có người
+        # ở tư thế nằm ngang — bị quật ngã/đè xuống).
         grapple_overlap = (bbox_iou > config.CONFLICT_GRAPPLE_IOU_THRESH
                            and dist < config.CONFLICT_GRAPPLE_DIST_THRESH)
-        grapple_activity = (max(jitter_A, jitter_B)
-                            > config.CONFLICT_GRAPPLE_MIN_JITTER)
+        grapple_activity = (max(condA["jitter"], condB["jitter"])
+                            > config.CONFLICT_GRAPPLE_MIN_JITTER
+                            or condA["lying"] or condB["lying"])
 
         # Tương tác: người kia cũng động hoặc khoảng cách dao động mạnh
         signal_mutual = mutual_agitation > config.CONFLICT_MUTUAL_AGITATION_THRESH
@@ -177,21 +203,58 @@ class PersonActionRules:
         # Đường B: cả 2 giật mạnh + có tương tác (đôi công / giằng co sát nhau)
         path_bbox = both_jittery and (signal_mutual or signal_oscillation)
 
-        # Đường C: vật lộn — 2 người CHỒNG bbox + ít nhất 1 người giằng co.
-        # Không cần signal_mutual/oscillation vì "người bị giữ" thường đứng
-        # yên (đó là bản chất của vật lộn: 1 người khống chế, 1 người giãy).
-        # Ôm nhau: grapple_activity fail (jitter≈0). Đi ngang: grapple_overlap
-        # fail (IoU thấp).
+        # Đường C: vật lộn/nằm vật — 2 người CHỒNG bbox + có người giằng co
+        # hoặc ở tư thế nằm. Ôm nhau: grapple_activity fail (jitter≈0, không
+        # nằm). Đi ngang: grapple_overlap fail (IoU thấp).
         path_grapple = (grapple_overlap and grapple_activity)
 
-        is_candidate = path_pose or path_bbox or path_grapple
+        # Đường D: MỘT CHIỀU tấn công — 1 người cực kỳ kích động (vung tay/
+        # giật) HOẶC tăng tốc đột ngột khi rất gần người kia (đấm/đẩy dồn dập).
+        top_agitation = max(agitation_A, agitation_B)
+        path_one_sided = (
+            (top_agitation > config.CONFLICT_ONE_SIDED_AGITATION_THRESH
+             or max(condA["accel"], condB["accel"])
+             > config.CONFLICT_ACCEL_THRESH)
+            and dist < config.CONFLICT_ONE_SIDED_DIST_THRESH
+            and (signal_oscillation or grapple_overlap)
+        )
+
+        # Đường E — NGƯỜI NGÃ trong cặp: ít nhất 1 người có tín hiệu ngã.
+        # KHÔNG đủ nếu chỉ "gần nhau + có người ngã" (người đứng gần có thể
+        # đang ngất xỉu/ngã bệnh, không phải đánh nhau). Phải KẾT HỢP thêm
+        # ít nhất 1 điều kiện xô xát:
+        #   (1) Người kia cũng BẤT THƯỜNG (kích động: vung tay/giật/tăng tốc
+        #       hoặc cũng ngã) — đôi công / đánh trả.
+        #   (2) 2 người CHỒNG BBOX (IoU cao) — vật lộn/đè/đánh gục.
+        #   (3) Khoảng cách DAO ĐỘNG mạnh — giằng co trước khi ngã.
+        #   (4) Tăng tốc/giảm tốc ĐỘT NGỘT — cú đấm/cú đẩy khiến người kia ngã.
+        fall_in_pair = condA["falling"] or condB["falling"]
+        attacker_abnormal = (condB["abnormal"] if condA["falling"]
+                             else condA["abnormal"])
+        path_fall = fall_in_pair and (
+            attacker_abnormal
+            or bbox_iou > config.CONFLICT_GRAPPLE_IOU_THRESH
+            or signal_oscillation
+            or max(condA["accel"], condB["accel"]) > config.CONFLICT_ACCEL_THRESH
+        )
+
+        is_candidate = (path_pose or path_bbox or path_grapple or path_one_sided
+                        or path_fall)
 
         # Điểm kết hợp (chỉ để tính confidence)
-        conflict_score = (max(wrist_A, wrist_B) * 0.4
-                          + (jitter_A + jitter_B) * 0.2
-                          + dist_variance * 40.0 * 0.3
-                          + mutual_agitation * 0.1
-                          + bbox_iou * 20.0 * 0.2)
+        # Tăng trọng số để xô xát CONFIRMED vượt MIN_ALERT_CONFIDENCE (0.9).
+        # Trước đây vật lộn tại chỗ chỉ đạt ~0.83 → bị lọc sạch ở main.py.
+        # Path E cộng bonus cố định để người ngã trong cặp luôn vượt ngưỡng.
+        conflict_score = (max(condA["wrist_speed"], condB["wrist_speed"]) * 0.30
+                          + max(condA["wrist_amplitude"],
+                                condB["wrist_amplitude"]) * 0.10
+                          + (condA["jitter"] + condB["jitter"]) * 0.30
+                          + max(condA["accel"], condB["accel"]) * 0.05
+                          + dist_variance * 40.0 * 0.25
+                          + mutual_agitation * 0.15
+                          + bbox_iou * 20.0 * 0.15
+                          + (1.0 if path_fall else 0.0)
+                          * config.CONFLICT_FALL_SCORE_BONUS)
 
         # Temporal sustained confirmation
         # Cap counter tại SUSTAINED + 2: khi hiện tượng dừng, chỉ cần decay
@@ -332,6 +395,100 @@ class PersonActionRules:
                         >= config.PERSON_COLLISION_SUSTAINED)
         return is_confirmed, collision_score
 
+    def check_group_conflict(self, persons):
+        """Phát hiện cụm 3 người tiếp cận/va chạm/xô xát theo temporal history.
+
+        Trả về event khi 3 người đủ gần nhau, ít nhất một người có trạng thái
+        bất thường, và mẫu chuyển động của cụm cho thấy tương tác thật.
+        """
+        if len(persons) < 3:
+            return False, 0.0, None
+
+        best_score = 0.0
+        best_ids = None
+
+        # Chỉ xét các cụm 3 người để giữ chi phí thấp và dễ debug.
+        for i in range(len(persons)):
+            for j in range(i + 1, len(persons)):
+                for k in range(j + 1, len(persons)):
+                    trio = (persons[i], persons[j], persons[k])
+                    if min(len(o.bbox_history) for o in trio) < 5:
+                        continue
+
+                    boxA, boxB, boxC = [o.bbox_history[-1] for o in trio]
+                    centA, centB, centC = [np.array(o.center_history[-1]) for o in trio]
+                    avg_h = np.mean([
+                        max(boxA[3] - boxA[1], 1e-5),
+                        max(boxB[3] - boxB[1], 1e-5),
+                        max(boxC[3] - boxC[1], 1e-5),
+                    ])
+
+                    # GATE: CẢ 3 phải CÙNG 1 ô lưới (vùng) trong frame.
+                    # Người ở các ô khác nhau là các khu vực khác nhau → không
+                    # xét như 1 cụm tương tác.
+                    if len({config.grid_zone(*c) for c in (centA, centB, centC)}) != 1:
+                        continue
+
+                    pair_dists = [
+                        np.linalg.norm(centA - centB) / avg_h,
+                        np.linalg.norm(centA - centC) / avg_h,
+                        np.linalg.norm(centB - centC) / avg_h,
+                    ]
+
+                    if max(pair_dists) > config.GROUP_INTERACTION_DIST_THRESH:
+                        continue
+
+                    conds = [self._assess_person_condition(o) for o in trio]
+                    abnormal_count = sum(1 for c in conds if c["abnormal"])
+                    if abnormal_count == 0:
+                        continue
+
+                    bbox_iou = max(
+                        self._calculate_iou(boxA, boxB),
+                        self._calculate_iou(boxA, boxC),
+                        self._calculate_iou(boxB, boxC),
+                    )
+
+                    motion_strength = max(
+                        max(c["wrist_speed"] for c in conds),
+                        max(c["jitter"] for c in conds),
+                        max(c["accel"] for c in conds),
+                    )
+                    pairwise_compactness = 1.0 - min(max(pair_dists), 1.0)
+                    score = min(
+                        0.98,
+                        0.30 * abnormal_count
+                        + 0.30 * pairwise_compactness
+                        + 0.20 * min(motion_strength / 20.0, 1.0)
+                        + 0.20 * bbox_iou,
+                    )
+
+                    if score > best_score:
+                        best_score = score
+                        best_ids = tuple(sorted(o.track_id for o in trio))
+
+        if best_ids is None:
+            return False, 0.0, None
+
+        if best_ids not in self.group_conflict_state:
+            self.group_conflict_state[best_ids] = 0
+
+        if best_score > 0.0:
+            self.group_conflict_state[best_ids] = min(
+                config.CONFLICT_SUSTAINED_FRAMES + 2,
+                self.group_conflict_state.get(best_ids, 0) + 1,
+            )
+        else:
+            self.group_conflict_state[best_ids] = max(
+                0, self.group_conflict_state.get(best_ids, 0) - 1
+            )
+
+        is_confirmed = (
+            best_score > 0.0
+            and self.group_conflict_state.get(best_ids, 0) >= config.CONFLICT_SUSTAINED_FRAMES
+        )
+        return is_confirmed, best_score, list(best_ids)
+
     def _is_falling(self, obj):
         """1 người đang ở tư thế ngã: nằm ngang hoặc rơi nhanh theo trục dọc."""
         if len(obj.bbox_history) < 2:
@@ -360,6 +517,11 @@ class PersonActionRules:
                           or k[1] not in active_track_ids]
             for k in lost_pairs:
                 del state_map[k]
+
+        lost_groups = [k for k in self.group_conflict_state
+                       if any(tid not in active_track_ids for tid in k)]
+        for k in lost_groups:
+            del self.group_conflict_state[k]
 
     # ----------------------------------------------------------------
     # Private Helpers
@@ -408,6 +570,87 @@ class PersonActionRules:
             reversals += int(np.sum(np.abs(np.diff(signs)) > 0))
 
         return speed_std + reversals * 2.0
+
+    def _assess_person_condition(self, obj):
+        """STAGE 1: Xác định người + đánh giá TÌNH TRẠNG của người đó.
+
+        Trả về dict chứa các tín hiệu tình trạng cá nhân (không phụ thuộc
+        người kia) + cờ abnormal = người có TÌNH TRẠNG bất thường hay không.
+        """
+        wrist_speed = self._get_wrist_speed(obj)
+        wrist_amplitude = self._get_wrist_amplitude(obj)
+        jitter = self._get_bbox_jitter(obj)
+        accel = self._get_sudden_accel(obj)
+        lying = self._is_lying(obj)
+        falling = self._is_falling(obj)
+
+        abnormal = (
+            wrist_speed > config.CONFLICT_WRIST_HIGH_THRESH
+            or wrist_amplitude > config.CONFLICT_WRIST_AMPLITUDE_THRESH
+            or jitter > config.CONFLICT_CALM_AGITATION_THRESH
+            or accel > config.CONFLICT_ACCEL_THRESH
+            or lying
+            or falling
+        )
+        return {
+            "wrist_speed": wrist_speed,
+            "wrist_amplitude": wrist_amplitude,
+            "jitter": jitter,
+            "accel": accel,
+            "lying": lying,
+            "falling": falling,
+            "abnormal": abnormal,
+        }
+
+    def _get_wrist_amplitude(self, obj):
+        """BIÊN ĐỘ vung tay (px) — cổ tay vung XA bao nhiêu trong cửa sổ.
+
+        Khác _get_wrist_speed (đo tốc độ tức thời), amplitude đo QUÃNG đường
+        cổ tay di chuyển xa nhất trong cửa sổ pose. Người vung tay đấm/vẫy
+        mạnh có biên độ lớn dù tốc độ 2 frame kề nhau có thể thấp.
+        """
+        if len(obj.pose_history) < 3:
+            return 0.0
+        window = min(6, len(obj.pose_history))
+        poses = [kp for kp in list(obj.pose_history)[-window:] if kp is not None]
+        if len(poses) < 2:
+            return 0.0
+
+        max_amp = 0.0
+        for idx in (9, 10):  # Wrist trái (9) / phải (10)
+            pts = []
+            for kp in poses:
+                if idx < len(kp) and kp[idx][2] > 0.3:
+                    pts.append(np.asarray(kp[idx][:2], dtype=float))
+            if len(pts) >= 2:
+                arr = np.asarray(pts)
+                # Biên độ = khoảng cách xa nhất giữa 2 vị trí cổ tay trong cửa sổ
+                span = float(np.max(np.linalg.norm(
+                    arr[:, None, :] - arr[None, :, :], axis=2)))
+                max_amp = max(max_amp, span)
+        return max_amp
+
+    def _get_sudden_accel(self, obj):
+        """TĂNG TỐC/giảm tốc đột ngột (px/s²) — lao tới / giật người.
+
+        Dùng độ lớn gia tốc lớn nhất trong cửa sổ ngắn; người đi bộ/đứng yên
+        có gia tốc nhỏ, lao tới/phanh gấp tạo đỉnh gia tốc rõ rệt.
+        """
+        if len(obj.accel_history) == 0:
+            return 0.0
+        window = min(4, len(obj.accel_history))
+        accels = [float(np.linalg.norm(a)) for a in list(obj.accel_history)[-window:]]
+        return max(accels)
+
+    def _is_lying(self, obj):
+        """Tư thế NẰM VẬT — aspect ratio ngang (w/h lớn) như người bị quật
+        ngã/đè xuống đất khi xô xát."""
+        if len(obj.bbox_history) == 0:
+            return False
+        box = obj.bbox_history[-1]
+        w = box[2] - box[0]
+        h = max(box[3] - box[1], 1e-5)
+        return (w / h) > config.CONFLICT_LYING_ASPECT_THRESH
 
     def _get_torso_angle(self, obj):
         if len(obj.pose_history) == 0 or obj.pose_history[-1] is None:

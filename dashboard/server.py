@@ -16,11 +16,13 @@ from dashboard.store import AlertStore
 EVENT_COLORS = {
     "HUMAN_FALL": "#ff9800",
     "HUMAN_CONFLICT": "#f44336",
+  "HUMAN_GROUP_CONFLICT": "#c62828",
     "PERSON_COLLISION": "#ff5722",
     "VEHICLE_COLLISION": "#ff9800",
     "VEHICLE_OBJECT_COLLISION": "#ffc107",
     "OBJECT_FALLING_ON_VEHICLE": "#9c27b0",
     "VEHICLE_STOP_ANOMALY": "#ff9800",
+    "VEHICLE_ACCIDENT": "#ff5722",
     "FIRE_DETECTED": "#f44336",
     "SMOKE_DETECTED": "#607d8b",
     "RESTRICTED_INTRUSION": "#d32f2f",
@@ -77,6 +79,7 @@ _INDEX_HTML = """<!DOCTYPE html>
   }
   .card .info { padding: 12px 14px; }
   .card .info .desc { font-size: 13px; color: #cdd6e4; margin-bottom: 8px; }
+  .card .info .evidence { font-size: 11px; color: #93a6c8; margin-bottom: 8px; line-height: 1.4; }
   .card .meta { display: flex; justify-content: space-between; font-size: 11px; color: #7e8aa0; }
   .card .meta .cam { color: #7eb6ff; }
   .card .meta .conf { color: #ffd166; }
@@ -94,11 +97,13 @@ _INDEX_HTML = """<!DOCTYPE html>
   <button class="active" data-type="ALL">Tất cả</button>
   <button data-type="HUMAN_FALL">Người ngã</button>
   <button data-type="HUMAN_CONFLICT">Xô xát</button>
+  <button data-type="HUMAN_GROUP_CONFLICT">Cụm 3 người</button>
   <button data-type="PERSON_COLLISION">Người va chạm</button>
   <button data-type="VEHICLE_COLLISION">Xe-xe</button>
   <button data-type="VEHICLE_OBJECT_COLLISION">Xe-vật thể</button>
   <button data-type="OBJECT_FALLING_ON_VEHICLE">Vật rơi vào xe</button>
   <button data-type="VEHICLE_STOP_ANOMALY">Xe dừng lạ</button>
+  <button data-type="VEHICLE_ACCIDENT">Xe lật/nghiêng</button>
   <button data-type="FIRE_DETECTED">Lửa</button>
   <button data-type="SMOKE_DETECTED">Khói</button>
   <button data-type="RESTRICTED_INTRUSION">Xâm nhập</button>
@@ -150,6 +155,8 @@ async function refresh() {
         </div>` : ''}
         <div class="info">
           <div class="desc">${esc(a.description)}</div>
+          ${a.evidence_objects && a.evidence_objects.length ? `
+          <div class="evidence">${a.evidence_objects.map(o => `#${esc(o.track_id)} ${esc(o.cls_id)} spd:${esc(o.speed)}`).join(' | ')}</div>` : ''}
           <div class="meta">
             <span class="cam">${esc(a.camera_id)} &mdash; ${esc(a.time_str)}</span>
             <span class="conf">conf: ${a.confidence}</span>

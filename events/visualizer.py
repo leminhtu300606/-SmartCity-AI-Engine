@@ -25,7 +25,13 @@ class EventVisualizer:
             )
 
         # 2. Vẽ Track Bounding Boxes (green: person, yellow: vehicle) + HUD đếm
-        cls_names = {0: "person", 2: "car", 3: "motorbike", 5: "bus", 7: "truck"}
+        cls_names = {
+            0: "person",
+            2: "car",
+            3: "motorbike",
+            5: "bus",
+            7: "construction_vehicle/truck",
+        }
         class_counts = {}
         for t_id, obj in memory_manager.visible_objects().items():
             latest_box = obj.predicted_bbox if obj.last_update_predicted else obj.bbox_history[-1]
@@ -82,9 +88,13 @@ class EventVisualizer:
                     color = (0, 0, 255)  # đỏ cho lửa/khói
                 elif ev["event_type"] == "HUMAN_CONFLICT":
                     color = (0, 0, 255)
+                elif ev["event_type"] == "HUMAN_GROUP_CONFLICT":
+                    color = (0, 0, 200)
                 elif ev["event_type"] in ("VEHICLE_OBJECT_COLLISION",
                                           "OBJECT_FALLING_ON_VEHICLE"):
                     color = (255, 0, 255)  # tím cho hành vi/va chạm bổ sung
+                elif ev["event_type"] == "VEHICLE_ACCIDENT":
+                    color = (0, 255, 255)  # vàng cyan cho xe lật/nghiêng
                 else:
                     color = (0, 165, 255)  # cam cho va chạm/ngã/xâm nhập
                 cv2.rectangle(canvas, (box[0], box[1]), (box[2], box[3]), color, 2)

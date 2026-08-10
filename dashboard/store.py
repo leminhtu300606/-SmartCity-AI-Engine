@@ -81,6 +81,7 @@ class AlertStore:
             "track_ids": list(event.get("track_ids", [])),
             "zone_name": event.get("zone_name", ""),
             "bbox": bbox,
+            "evidence_objects": list(event.get("evidence_objects", [])),
             "snapshot": snap_key,
             "crop": crop_key if crop_bytes is not None else None,
         }
@@ -131,10 +132,18 @@ class AlertStore:
         """Ghi 1 dòng log cảnh báo (có vị trí bbox) vào alerts.log."""
         bbox = alert["bbox"]
         bbox_str = "none" if bbox is None else ",".join(str(int(round(float(v)))) for v in np.ravel(bbox))
+        evidence = alert.get("evidence_objects") or []
+        evidence_str = "none"
+        if evidence:
+            evidence_str = ";".join(
+                f"id={obj.get('track_id')} cls={obj.get('cls_id')} speed={obj.get('speed')}"
+                for obj in evidence
+            )
         line = (
             f"[{alert['time_str']}] [{alert['camera_id']}] "
             f"{alert['event_type']} | conf={alert['confidence']} | "
             f"bbox=[{bbox_str}] | {alert['description']} | "
+            f"evidence={evidence_str} | "
             f"snapshot={alert['snapshot']} crop={alert['crop']}\n"
         )
         try:

@@ -50,10 +50,25 @@ class SmokeFireRules:
         self._frame_cell_signals = {}    # roi_base -> set(cell_name) trong frame hiện tại
         self._frame_cell_bboxes = {}     # roi_base -> [bbox, ...] trong frame hiện tại
 
+        # COOLDOWN: frame_count -> thời điểm được phép báo lại từng zone.
+        # Sau khi emit event, zone bị "cấm" trong SMOKE_FIRE_ALERT_COOLDOWN frame
+        # để diệt tình trạng cùng 1 ô báo lặp lại liên tục (false positive kéo dài).
+        self._frame_count = 0
+        self.alert_cooldown = {}         # key -> frame đủ hạn được báo lại
+
+    def _alert_ready(self, key):
+        """True nếu zone `key` hết cooldown (được phép báo event mới)."""
+        return self.alert_cooldown.get(key, -1) <= self._frame_count
+
+    def _mark_alert(self, key):
+        """Đánh dấu zone `key` vừa báo → cấm báo lại trong N frame."""
+        self.alert_cooldown[key] = (self._frame_count
+                                    + config.SMOKE_FIRE_ALERT_COOLDOWN)
+
     # ================================================================
     # ORCHESTRATOR — chạy pipeline cho từng ROI / ô grid
     # ================================================================
-    def analyze_frame(self, frame_bgr, roi_polygons):
+    def analyze_frame(self, frame_bgr, roi_polygons, object_bboxes=None):
         """Phát hiện khói/lửa theo TỪNG Ô NHỎ (grid) trong khung hình.
 
         Mỗi ROI được chia thành lưới ô nhỏ (SMOKE_FIRE_GRID_COLS x ROWS). Mỗi ô
@@ -62,10 +77,16 @@ class SmokeFireRules:
           toàn frame.
         - Event trả về kèm bbox của ô → định vị chính xác vị trí nghi vấn.
         Nếu ô nhỏ quá (không đủ pixel), mạng lưới vẫn giữ ngưỡng tỉ lệ để nhạy.
+
+        object_bboxes: list [x1, y1, x2, y2] của NGƯỜI (person) đã detect bởi
+        YOLO. Vùng "lửa" nằm chủ yếu trong bbox người = áo quần màu đỏ/cam →
+        bị loại (không phải lửa thật).
         """
         events = []
         if frame_bgr is None:
             return events
+
+        self._frame_count += 1
 
         # Reset tín hiệu frame hiện tại (gom lửa nhỏ theo ROI base)
         self._frame_cell_signals = {}
@@ -96,12 +117,12 @@ class SmokeFireRules:
             if config.SMOKE_FIRE_GRID_ENABLED:
                 events.extend(self._analyze_grid(
                     base_name, roi_mask, hsv, fire_mask, smoke_mask,
-                    glow_mask=glow_mask,
+                    glow_mask=glow_mask, object_bboxes=object_bboxes,
                 ))
             else:
                 events.extend(self._analyze_zone(
                     base_name, roi_mask, None, hsv, fire_mask, smoke_mask,
-                    glow_mask=glow_mask,
+                    glow_mask=glow_mask, object_bboxes=object_bboxes,
                 ))
 
             # Lửa nhỏ DI ĐỘNG: gom tín hiệu từ các ô trong ROI này
@@ -109,6 +130,7 @@ class SmokeFireRules:
                 base_name,
                 self._frame_cell_signals.get(base_name, set()),
                 self._frame_cell_bboxes.get(base_name, []),
+                object_bboxes=object_bboxes,
             )
             if moving_ev is not None:
                 events.append(moving_ev)
@@ -182,7 +204,7 @@ class SmokeFireRules:
         return cv2.morphologyEx(smoke_mask_raw, cv2.MORPH_OPEN, kernel)
 
     def _analyze_grid(self, base_name, roi_mask, hsv, fire_mask, smoke_mask,
-                      glow_mask=None):
+                      glow_mask=None, object_bboxes=None):
         """Chia ROI thành lưới ô nhỏ và phân tích từng ô riêng biệt.
 
         Mỗi ô có zone_name = f"{base_name}|r{r}c{c}" → persistence theo ô.
@@ -226,6 +248,7 @@ class SmokeFireRules:
                     fire_px_thresh=fire_px_thresh,
                     smoke_px_thresh=smoke_px_thresh,
                     glow_mask=glow_mask,
+                    object_bboxes=object_bboxes,
                 )
                 events.extend(cell_events)
 
@@ -237,7 +260,7 @@ class SmokeFireRules:
     def _analyze_zone(self, zone_name, roi_mask, bbox, hsv,
                       fire_mask, smoke_mask,
                       fire_px_thresh=None, smoke_px_thresh=None,
-                      glow_mask=None):
+                      glow_mask=None, object_bboxes=None):
         """Chạy pipeline 4 stage cho một vùng (ROI hoặc ô grid)."""
         if fire_px_thresh is None:
             fire_px_thresh = config.SMOKE_FIRE_FIRE_PIXEL_THRESH
@@ -257,6 +280,7 @@ class SmokeFireRules:
         fire_ev = self._fire_pipeline(
             zone_name, roi_mask, bbox, hsv, fire_mask,
             roi_area, fire_px_thresh, min_contour,
+            object_bboxes=object_bboxes,
         )
         has_direct_fire = fire_ev is not None
         if fire_ev is not None:
@@ -271,6 +295,7 @@ class SmokeFireRules:
                 zone_name, roi_mask, bbox, hsv, fire_mask,
                 config.SMOKE_FIRE_SMALL_FIRE_PIXEL_THRESH,
                 config.SMOKE_FIRE_SMALL_FIRE_MIN_CONTOUR,
+                object_bboxes=object_bboxes,
             )
             if small_ev is not None:
                 events.append(small_ev)
@@ -286,6 +311,7 @@ class SmokeFireRules:
                 zone_name, roi_mask, bbox, hsv, glow_mask,
                 config.SMOKE_FIRE_GLOW_MIN_PIXELS,
                 config.SMOKE_FIRE_GLOW_MIN_CONTOUR,
+                object_bboxes=object_bboxes,
             )
             if glow_ev is not None:
                 events.append(glow_ev)
@@ -306,7 +332,8 @@ class SmokeFireRules:
     # STAGE 1: FIRE visual detection + feature extraction
     # ----------------------------------------------------------------
     def _fire_pipeline(self, zone_name, roi_mask, bbox, hsv, fire_mask,
-                       roi_area, fire_px_thresh, min_contour):
+                       roi_area, fire_px_thresh, min_contour,
+                       object_bboxes=None):
         """Fire: STAGE 1 (detection) → STAGE 2 (persistence)
         → STAGE 3 (growth) → STAGE 4 (event)."""
         fire_in_roi = cv2.bitwise_and(fire_mask, roi_mask)
@@ -341,6 +368,14 @@ class SmokeFireRules:
         core_ok = core_ratio > config.SMOKE_FIRE_FIRE_BRIGHT_CORE_RATIO_THRESH
         fire_nature = hue_ok or core_ok
 
+        # --- LOẠI VẬT THỂ MÀU ĐỎ (áo quần người) ---
+        # Vùng "lửa" nằm chủ yếu TRONG bbox người = áo đỏ/cam, không phải lửa.
+        person_overlap = self._fire_inside_objects_ratio(
+            fire_in_roi, object_bboxes)
+        is_object_clothing = (
+            object_bboxes
+            and person_overlap > config.SMOKE_FIRE_MAX_PERSON_OVERLAP)
+
         # STAGE 3 — Region growth / motion:
         area_fluct = self._compute_fire_area_fluct(zone_name, fire_pixels)
 
@@ -364,10 +399,16 @@ class SmokeFireRules:
                  or edge_irregularity > jagged_thresh)
         )
 
+        # LỬA THẬT phải có bản chất lửa (đa sắc HOẶC lõi sáng): vật đỏ/cam thuần
+        # không thỏa dù có nhấp nháy cạnh (màu đồng nhất tuyệt đối, không lõi).
+        # 3 đường nêu trên tự đòi fire_nature (dynamic/static), chỉ đường
+        # uniform_flicker_path (cháy âm ỉ) cần fire_nature bổ sung.
         is_fire_signal = (
             fire_pixels > fire_px_thresh
             and fire_contrast > contrast_thresh
-            and (dynamic_path or static_path or uniform_flicker_path)
+            and not is_object_clothing
+            and (dynamic_path or static_path
+                 or (uniform_flicker_path and fire_nature))
         )
 
         # STAGE 2 — Temporal persistence (cap để decay nhanh khi hết tín hiệu)
@@ -393,7 +434,9 @@ class SmokeFireRules:
             growth = 0.08
 
         # STAGE 4 — FIRE EVENT
-        if self.fire_persistence_map.get(zone_name, 0) >= config.SMOKE_FIRE_FIRE_PERSIST_THRESH:
+        if (self.fire_persistence_map.get(zone_name, 0) >= config.SMOKE_FIRE_FIRE_PERSIST_THRESH
+                and self._alert_ready(zone_name)):
+            self._mark_alert(zone_name)
             conf = min(0.98, 0.90 + growth
                        + min(fire_class_score, 1.0) * 0.06
                        + min(fire_contrast / 300.0, 0.03))
@@ -412,7 +455,7 @@ class SmokeFireRules:
     # SMALL FIRE — điểm cháy nhỏ / lửa bị che khuất MỘT PHẦN
     # ----------------------------------------------------------------
     def _small_fire_pipeline(self, zone_name, roi_mask, bbox, hsv, fire_mask,
-                             px_thresh, min_contour):
+                             px_thresh, min_contour, object_bboxes=None):
         """Lửa NHỎ (vài chục pixel) hoặc lửa chỉ lộ ra ít pixel sau vật cản.
 
         Ngọn lửa nhỏ vẫn giữ bản chất lửa:
@@ -439,8 +482,16 @@ class SmokeFireRules:
         fire_nature_ok = (hue_spread > config.SMOKE_FIRE_SMALL_FIRE_HUE_VAR_THRESH
                           or core_ratio > config.SMOKE_FIRE_SMALL_FIRE_CORE_RATIO_THRESH)
 
+        # Vùng "lửa" nằm chủ yếu trong bbox NGƯỜI = áo quần đỏ/cam → loại.
+        person_overlap = self._fire_inside_objects_ratio(
+            fire_in_roi, object_bboxes)
+        is_object_clothing = (
+            object_bboxes
+            and person_overlap > config.SMOKE_FIRE_MAX_PERSON_OVERLAP)
+
         is_small_fire = (fire_pixels > px_thresh
-                         and flicker_ok and fire_nature_ok)
+                         and flicker_ok and fire_nature_ok
+                         and not is_object_clothing)
 
         # Ghi tín hiệu vào frame hiện tại (cho bộ gom lửa di động) — chỉ cho ô grid
         if is_small_fire and bbox is not None and "|" in zone_name:
@@ -449,16 +500,15 @@ class SmokeFireRules:
             self._frame_cell_bboxes.setdefault(base, []).append(bbox)
 
         # STAGE 2 — Temporal persistence (key riêng để không trộn với lửa chính)
-        # Hold-zone: lửa nhỏ nhấp nháy có lúc sụt xuống dưới ngưỡng → giữ nguyên
-        # counter (không trừ) nếu còn >= 50% ngưỡng, tránh reset khi thoáng mất.
+        # Decay chuẩn (giống lửa chính): khi mất tín hiệu → counter giảm dần về 0.
+        # Trước đây dùng hold-zone (giữ counter khi còn >= 50% ngưỡng) khiến counter
+        # nằm mãi trên ngưỡng → báo lặp lại mọi frame. Cooldown + decay chuẩn sẽ chặn.
         key = "small|" + zone_name
         if is_small_fire:
             self.fire_persistence_map[key] = min(
                 config.SMOKE_FIRE_SMALL_FIRE_PERSIST_THRESH + 2,
                 self.fire_persistence_map.get(key, 0) + 1,
             )
-        elif fire_pixels > px_thresh * 0.5:
-            pass
         else:
             self.fire_persistence_map[key] = max(
                 0, self.fire_persistence_map.get(key, 0) - 1
@@ -466,7 +516,9 @@ class SmokeFireRules:
 
         # STAGE 4 — FIRE EVENT
         if (self.fire_persistence_map.get(key, 0)
-                >= config.SMOKE_FIRE_SMALL_FIRE_PERSIST_THRESH):
+                >= config.SMOKE_FIRE_SMALL_FIRE_PERSIST_THRESH
+                and self._alert_ready(key)):
+            self._mark_alert(key)
             fire_ev = {
                 "event_type": "FIRE_DETECTED",
                 "zone_name": zone_name,
@@ -483,7 +535,8 @@ class SmokeFireRules:
     # ----------------------------------------------------------------
     # MOVING SMALL FIRE — nguồn sáng nhỏ KHÔNG CỐ ĐỊNH, di chuyển giữa các ô
     # ----------------------------------------------------------------
-    def _aggregate_moving_fire(self, base_name, cell_keys, cell_bboxes):
+    def _aggregate_moving_fire(self, base_name, cell_keys, cell_bboxes,
+                               object_bboxes=None):
         """Gom tín hiệu lửa nhỏ ở mức ROI để bắt điểm lửa di động.
 
         Điểm lửa nhỏ (tàn lửa, ngọn đuốc, ngọn lửa nhỏ bị gió lay...) di chuyển
@@ -492,8 +545,25 @@ class SmokeFireRules:
           - Có tín hiệu lửa nhỏ liên tục (counter theo persistence).
           - Lửa xuất hiện ở >= 2 ô KHÁC NHAU trong cửa sổ → chứng tỏ DI ĐỘNG
             (không phải 1 điểm cố định — điểm cố định do pipeline từng ô xử lý).
+        Vùng tín hiệu nằm trong bbox NGƯỜI (áo đỏ/cam di chuyển) bị loại.
         """
         key = "move|" + base_name
+
+        # Loại bỏ tín hiệu nằm chủ yếu trong bbox người (áo đỏ/cam) trước khi
+        # đếm: hợp nhất tất cả cell bbox của frame này thành 1 mask, nếu phần
+        # lớn diện tích đó nằm trong người → đó là người mặc áo đỏ, không phải
+        # điểm lửa di động → coi như không có tín hiệu (counter sẽ decay).
+        if cell_bboxes and object_bboxes:
+            frame_h = max(bb[3] for bb in cell_bboxes)
+            frame_w = max(bb[2] for bb in cell_bboxes)
+            cell_mask = np.zeros((frame_h, frame_w), dtype=np.uint8)
+            for bb in cell_bboxes:
+                x1, y1, x2, y2 = [int(v) for v in bb]
+                cv2.rectangle(cell_mask, (x1, y1), (x2, y2), 255, -1)
+            r = self._fire_inside_objects_ratio(cell_mask, object_bboxes)
+            if r > config.SMOKE_FIRE_MAX_PERSON_OVERLAP:
+                cell_keys = set()
+                cell_bboxes = []
 
         if cell_keys:
             self.moving_fire_counter[key] = min(
@@ -520,8 +590,10 @@ class SmokeFireRules:
         # Chỉ báo khi có DI ĐỘNG thật (>= 2 ô khác nhau) + tín hiệu kéo dài
         if (len(distinct_cells) < 2
                 or self.moving_fire_counter[key]
-                < config.SMOKE_FIRE_SMALL_FIRE_PERSIST_THRESH):
+                < config.SMOKE_FIRE_SMALL_FIRE_PERSIST_THRESH
+                or not self._alert_ready(key)):
             return None
+        self._mark_alert(key)
 
         x1 = min(b[0] for b in all_bboxes)
         y1 = min(b[1] for b in all_bboxes)
@@ -542,7 +614,7 @@ class SmokeFireRules:
     # FIRE GLOW — lửa bị che khuất hoàn toàn (tường, container, bờ kè...)
     # ----------------------------------------------------------------
     def _fire_glow_pipeline(self, zone_name, roi_mask, bbox, hsv, glow_mask,
-                            px_thresh, min_contour):
+                            px_thresh, min_contour, object_bboxes=None):
         """Quầng sáng ấm hắt ra vật cản — bản thân ngọn lửa không hiện rõ.
 
         Lửa ẩn sau tường vẫn:
@@ -559,30 +631,40 @@ class SmokeFireRules:
         flicker_score = self._compute_flicker("glow|" + zone_name, glow_in_roi)
         flicker_freq = self._compute_flicker_frequency(
             "glow|" + zone_name, glow_pixels > px_thresh)
-        # Đa sắc ấm — không dùng làm gate (mask glow đã đảm bảo màu ấm) mà
-        # chỉ tăng confidence: quầng nhiều sắc độ (đỏ→cam→vàng) = lửa thật.
+        # Đa sắc ấm — lửa thật luôn trải nhiều sắc độ (đỏ→cam→vàng); áo quần
+        # đỏ/cam đồng nhất một sắc độ → hue variance ≈ 0. Gate chặn vật đỏ.
         hue_spread = self._compute_fire_hue_spread(
             glow_in_roi, hsv, min_area=min_contour)
+        hue_ok = hue_spread > config.SMOKE_FIRE_GLOW_HUE_VAR_THRESH
 
-        # Gate: vùng ấm hiện diện + NHẤP NHÁY (lửa ẩn làm quầng sáng pulse) 
-        # + kéo dài (persistence). Vật tĩnh màu ấm không nhấp nháy → bị loại.
+        # Vùng ấm nằm chủ yếu trong bbox NGƯỜI = áo quần đỏ/cam → loại.
+        person_overlap = self._fire_inside_objects_ratio(
+            glow_in_roi, object_bboxes)
+        is_object_clothing = (
+            object_bboxes
+            and person_overlap > config.SMOKE_FIRE_MAX_PERSON_OVERLAP)
+
+        # Gate: vùng ấm hiện diện + NHẤP NHÁY (lửa ẩn làm quầng sáng pulse)
+        # + đa sắc ấm (bản chất lửa) + kéo dài (persistence). Vật tĩnh màu ấm
+        # không nhấp nháy / vật đỏ không đa sắc → bị loại.
         is_glow_signal = (
             glow_pixels > px_thresh
             and (flicker_score > config.SMOKE_FIRE_GLOW_FLICKER_THRESH
                  or flicker_freq > config.SMOKE_FIRE_FLICKER_FREQ_THRESH)
+            and hue_ok
+            and not is_object_clothing
         )
 
         # STAGE 2 — Temporal persistence
-        # Hold-zone: quầng sáng nhấp nháy lúc mạnh lúc yếu → giữ counter nếu
-        # còn >= 50% ngưỡng pixel, không reset ngay khi thoáng sụt.
+        # Decay chuẩn: khi quầng không còn nhấp nháy/đa sắc/đủ pixel → counter giảm
+        # về 0. Trước đây dùng hold-zone giữ counter mãi trên ngưỡng → 1 bề mặt ấm
+        # tĩnh (tường nắng, xe cam) báo lặp lại vô tận. Cooldown chặn báo lặp.
         key = "glow|" + zone_name
         if is_glow_signal:
             self.fire_persistence_map[key] = min(
                 config.SMOKE_FIRE_GLOW_PERSIST_THRESH + 2,
                 self.fire_persistence_map.get(key, 0) + 1,
             )
-        elif glow_pixels > px_thresh * 0.5:
-            pass
         else:
             self.fire_persistence_map[key] = max(
                 0, self.fire_persistence_map.get(key, 0) - 1
@@ -590,7 +672,9 @@ class SmokeFireRules:
 
         # STAGE 4 — FIRE EVENT
         if (self.fire_persistence_map.get(key, 0)
-                >= config.SMOKE_FIRE_GLOW_PERSIST_THRESH):
+                >= config.SMOKE_FIRE_GLOW_PERSIST_THRESH
+                and self._alert_ready(key)):
+            self._mark_alert(key)
             glow_ev = {
                 "event_type": "FIRE_DETECTED",
                 "zone_name": zone_name,
@@ -651,7 +735,9 @@ class SmokeFireRules:
 
         # STAGE 4 — SMOKE EVENT (STAGE 3: shape_change/spread đã tính ở trên)
         if (self.smoke_persistence_map.get(zone_name, 0)
-                >= config.SMOKE_FIRE_SMOKE_PERSIST_THRESH):
+                >= config.SMOKE_FIRE_SMOKE_PERSIST_THRESH
+                and self._alert_ready("smoke|" + zone_name)):
+            self._mark_alert("smoke|" + zone_name)
             smoke_ev = {
                 "event_type": "SMOKE_DETECTED",
                 "zone_name": zone_name,
@@ -856,26 +942,57 @@ class SmokeFireRules:
         return max(0.0, 1.0 - r)
 
     def _compute_fire_bright_core(self, fire_in_roi, hsv, min_area=None):
-        """Tỷ lệ pixel lõi sáng (trắng/vàng nhạt) trong vùng lửa.
+        """Tỷ lệ pixel lõi sáng (trắng/vàng nhạt) TRONG/NHẠT vùng lửa.
 
-        Lửa thật có lõi rất sáng (V cao) và ít bão hòa (S thấp) — màu trắng/
-        vàng nhạt. Vật đỏ bão hòa (S cao) không có lõi như vậy dù rất sáng
-        (đèn pha, áo đỏ chiếu nắng, xe đỏ) → core ratio ≈ 0.
+        Lửa thật có lõi rất sáng (V cao) và ít bão hòa (S thấp) nằm GIỮA ngọn
+        lửa. Lõi trắng/vàng nhạt thường bị loại khỏi fire mask (mask yêu cầu
+        S >= 90) nên phải NỞ RỘNG vùng lửa (dilate) trước khi đo. Vật đỏ/cam
+        thuần (S cao khắp nơi — áo đỏ, xe đỏ, đèn) không có pixel sáng bão hòa
+        thấp nào → ratio ≈ 0. Đo thực tế: lửa ~0.045, vật đỏ ~0.000.
         """
         if min_area is None:
             min_area = config.SMOKE_FIRE_MIN_CONTOUR_AREA
-        mask = fire_in_roi > 0
-        total = int(np.count_nonzero(mask))
-        if total < min_area:
+        if cv2.countNonZero(fire_in_roi) < min_area:
             return 0.0
+
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        dilated = cv2.dilate(fire_in_roi, kernel)
 
         v = hsv[:, :, 2].astype(np.float32)
         s = hsv[:, :, 1].astype(np.float32)
-        core = ((v > config.SMOKE_FIRE_FIRE_CORE_V_THRESH)
-                & (s < config.SMOKE_FIRE_FIRE_CORE_S_MAX)
-                & mask)
-        core_count = int(np.count_nonzero(core))
-        return core_count / max(total, 1)
+        core = ((dilated > 0)
+                & (v > config.SMOKE_FIRE_FIRE_CORE_V_THRESH)
+                & (s < config.SMOKE_FIRE_FIRE_CORE_S_MAX))
+        total = int(np.count_nonzero(dilated > 0))
+        if total == 0:
+            return 0.0
+        return int(np.count_nonzero(core)) / max(total, 1)
+
+    def _fire_inside_objects_ratio(self, fire_mask_roi, object_bboxes):
+        """Tỷ lệ pixel "lửa" nằm BÊN TRONG bbox của object đã detect (người...).
+
+        Người mặc áo đỏ/cam → vùng màu lửa nằm gần như trọn trong bbox người
+        → ratio cao → coi là vật thể, không phải lửa (loại bỏ false positive).
+        Lửa thật không nằm trong bbox người → ratio thấp → giữ nguyên.
+        """
+        if not object_bboxes or cv2.countNonZero(fire_mask_roi) == 0:
+            return 0.0
+
+        h, w = fire_mask_roi.shape[:2]
+        obj_mask = np.zeros((h, w), dtype=np.uint8)
+        for b in object_bboxes:
+            x1, y1, x2, y2 = [int(v) for v in b]
+            x1 = max(0, min(x1, w - 1))
+            x2 = max(0, min(x2, w - 1))
+            y1 = max(0, min(y1, h - 1))
+            y2 = max(0, min(y2, h - 1))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            cv2.rectangle(obj_mask, (x1, y1), (x2, y2), 255, -1)
+
+        overlap = cv2.countNonZero(cv2.bitwise_and(fire_mask_roi, obj_mask))
+        total = cv2.countNonZero(fire_mask_roi)
+        return overlap / max(total, 1)
 
     def _compute_fire_area_fluct(self, zone_name, current_pixels):
         """Hệ số biến thiên (CV = std/mean) của diện tích lửa trong cửa sổ.
