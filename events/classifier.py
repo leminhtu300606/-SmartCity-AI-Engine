@@ -6,6 +6,24 @@ from events.confirm import EventConfirmTracker
 import config
 
 
+_VEHICLE_NAMES = {
+    1: "xe đạp",
+    2: "ô tô",
+    3: "xe máy",
+    5: "xe buýt",
+    6: "tàu hỏa",
+    7: "xe tải",
+    8: "thuyền",
+}
+
+
+def name_of(obj):
+    vtype = getattr(obj, "vehicle_type", None)
+    if vtype:
+        return vtype
+    return _VEHICLE_NAMES.get(obj.cls_id, f"phương tiện #{obj.cls_id}")
+
+
 class RuleBasedEventClassifier:
     """Classifier tổng hợp gom toàn bộ 4 logic sự kiện.
 
@@ -100,7 +118,7 @@ class RuleBasedEventClassifier:
 
 
                 # Logic 2: Vehicle hard stop (class 2,3,5,7)
-                if obj.cls_id in [2, 3, 5, 7]:
+                if obj.cls_id in config.VEHICLE_CLASSES:
                     if self.vehicle_rules.check_hard_stop(obj):
                         candidates.append({
                             "event_type": "VEHICLE_STOP_ANOMALY",
@@ -149,7 +167,8 @@ class RuleBasedEventClassifier:
                                 "bbox": self._union_bbox(oA, oB),
                                 "confidence": min(1.0, 0.80 + score / 40.0),
                                 "description":
-                                    "Phát hiện xô xát/đánh nhau/giằng co",
+                                    "Phát hiện xô xát/đánh nhau "
+                                    "(gồm cả đánh võ/vật biểu diễn)",
                                     "zone_name": f"grid_{zone_a}",
                                     "evidence_objects": [
                                         self._object_evidence(oA),
@@ -224,9 +243,9 @@ class RuleBasedEventClassifier:
                     oA, oB = objects[i], objects[j]
 
                     # Logic 2: Vehicle collision
-                    if oA.cls_id in [2, 3, 5, 7] or oB.cls_id in [2, 3, 5, 7]:
+                    if oA.cls_id in config.VEHICLE_CLASSES or oB.cls_id in config.VEHICLE_CLASSES:
                         # 2.1) Xe - Xe (cả 2 là phương tiện)
-                        if oA.cls_id in [2, 3, 5, 7] and oB.cls_id in [2, 3, 5, 7]:
+                        if oA.cls_id in config.VEHICLE_CLASSES and oB.cls_id in config.VEHICLE_CLASSES:
                             is_collision, c_score = self.vehicle_rules.check_collision(oA, oB)
                             if is_collision:
                                 candidates.append({
@@ -235,7 +254,8 @@ class RuleBasedEventClassifier:
                                     "bbox": self._union_bbox(oA, oB),
                                     "confidence": min(0.98, 0.75 + c_score * 0.25),
                                     "description":
-                                        "Phát hiện va chạm phương tiện/vật thể",
+                                        f"Phát hiện TAI NẠN giao thông: "
+                                        f"{name_of(oA)} và {name_of(oB)} va chạm",
                                     "evidence_objects": [
                                         self._object_evidence(oA),
                                         self._object_evidence(oB),
@@ -244,7 +264,7 @@ class RuleBasedEventClassifier:
 
                         # 2.2) Xe - Vật thể / người (chỉ 1 bên là xe)
                         else:
-                            objV = oA if oA.cls_id in [2, 3, 5, 7] else oB
+                            objV = oA if oA.cls_id in config.VEHICLE_CLASSES else oB
                             objO = oB if objV is oA else oA
                             is_obj_collision, oc_score = (
                                 self.vehicle_rules.check_object_collision(objV, objO)
@@ -276,6 +296,27 @@ class RuleBasedEventClassifier:
                                     "description":
                                         "Phát hiện xe bị vật thể/người đè lên "
                                         "(nghi tai nạn)",
+                                    "evidence_objects": [
+                                        self._object_evidence(oA),
+                                        self._object_evidence(oB),
+                                    ],
+                                })
+
+                            # Stage 2: VẬT DỤNG BÊN NGOÀI tác động vào xe — nhưng
+                            # TRƯỚC đó phải xác định xe BÌNH THƯỜNG (chạy ổn định,
+                            # không lật/dừng) mới kết luận là do vật dụng gây ra.
+                            is_ext_impact, ext_score = (
+                                self.vehicle_rules.check_external_impact(objV, objO)
+                            )
+                            if is_ext_impact:
+                                candidates.append({
+                                    "event_type": config.EVENT_TYPE_VEHICLE_EXTERNAL_IMPACT,
+                                    "track_ids": [oA.track_id, oB.track_id],
+                                    "bbox": self._union_bbox(oA, oB),
+                                    "confidence": min(0.95, 0.70 + ext_score * 0.25),
+                                    "description":
+                                        "Xe đang chạy bình thường bị vật dụng bên "
+                                        "ngoài tác động (nghi tai nạn)",
                                     "evidence_objects": [
                                         self._object_evidence(oA),
                                         self._object_evidence(oB),

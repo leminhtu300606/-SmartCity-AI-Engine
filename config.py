@@ -9,7 +9,44 @@ TEMPORAL_BUFFER_MAXLEN = 45          # Tăng để phân tích temporal tốt h�
 DEVICE = "cpu"                       # "cpu" hoặc "0" (GPU)
 DET_MODEL_PATH = "weights/yolov8n.pt"
 POSE_MODEL_PATH = "weights/yolov8n-pose.pt"
-DETECT_CLASSES = [0, 2, 3, 5, 7]     # person, car, motorbike, bus, truck
+# ============================================================
+# FINE-GRAINED VEHICLE CLASSIFICATION (xe máy / xe tải / xe chở dầu...)
+# Model YOLO-cls (yolov8n-cls) đã train riêng cho các dạng xe.
+# Nếu file model chưa tồn tại -> tự vô hiệu hoá, pipeline chạy như cũ.
+# ============================================================
+VEHICLE_CLS_ENABLED = True
+VEHICLE_CLS_MODEL_PATH = "weights/vehicle_cls.pt"
+VEHICLE_CLS_CROP_MARGIN = 1.15          # Mở rộng crop quanh bbox xe
+VEHICLE_CLS_MIN_CONF = 0.55             # Conf tối thiểu để chấp nhận nhãn
+# --- Chống CHE KHUẤT / xe KHÔNG HOÀN CHỈNH ---
+# Xe bị che 1 số góc cạnh → bbox nhỏ/thiếu context. Xử lý:
+#   - Bbox nhỏ → mở rộng context (CROP_MARGIN_OCCLUDED) + upscale crop.
+#   - Temporal MAJORITY VOTE theo track: 1 frame phân loại sai/thiếu không
+#     làm đổi nhãn; phải nhiều frame ủng hộ cùng 1 loại xe mới chốt.
+VEHICLE_CLS_CROP_MARGIN_OCCLUDED = 1.6  # Mở rộng crop khi bbox nhỏ/bị che
+VEHICLE_CLS_VOTE_MIN = 2                # Số frame ủng hộ tối thiểu cùng 1 loại xe
+VEHICLE_CLS_VOTE_KEEP = 8               # Cửa sổ vote trượt (frame)
+VEHICLE_CLS_IN_VEHICLE_REMOVE_RATIO = 0.70  # Bỏ track NGƯỜI nằm >= 70% diện tích trong bbox xe (tài xế/hành khách) — phân biệt rõ người/xe
+VEHICLE_CLS_NAME_MAP = {                # Tên class của model -> tiếng Việt
+    "xe_may": "xe máy",
+    "motorbike": "xe máy",
+    "xe_tai": "xe tải",
+    "truck": "xe tải",
+    "xe_cho_dau": "xe chở dầu",
+    "tanker": "xe chở dầu",
+    "xe_buyt": "xe buýt",
+    "bus": "xe buýt",
+    "o_to": "ô tô",
+    "car": "ô tô",
+    "xe_dap": "xe đạp",
+    "bicycle": "xe đạp",
+    "tau_hoa": "tàu hỏa",
+    "train": "tàu hỏa",
+    "thuyen": "thuyền",
+    "boat": "thuyền",
+}
+DETECT_CLASSES = [0, 1, 2, 3, 5, 6, 7, 8]  # person + toàn bộ phương tiện
+VEHICLE_CLASSES = [1, 2, 3, 5, 6, 7, 8]    # bicycle, car, motorbike, bus, train, truck, boat
 CONF_THRESH = 0.30                   # Giảm nhẹ để recall tốt hơn (was 0.35)
 ENABLE_POSE = True
 MIN_ALERT_CONFIDENCE = 0.9           # Chỉ đưa alert (log/vẽ/snapshot) có confidence >= ngưỡng này
@@ -22,6 +59,7 @@ EVENT_TYPE_SMOKE_FIRE = "SMOKE_FIRE"
 EVENT_TYPE_INTRUSION = "INTRUSION"
 EVENT_TYPE_VEHICLE_OBJECT_COLLISION = "VEHICLE_OBJECT_COLLISION"
 EVENT_TYPE_OBJECT_FALLING = "OBJECT_FALLING_ON_VEHICLE"
+EVENT_TYPE_VEHICLE_EXTERNAL_IMPACT = "VEHICLE_EXTERNAL_IMPACT"
 
 # Stream URLs
 CAMERA_STREAMS = {
@@ -119,12 +157,11 @@ EVENT_CONFIRM_MAP = {
     "PERSON_COLLISION": 3,           # Closing speed tính trung bình 3 frame; cửa sổ candidate ngắn khi vật gặp nhau
     "VEHICLE_COLLISION": 1,          # Rule collision đã tự sustained (VEHICLE_COLLISION_SUSTAINED=3); confirm=1 để khỏi đếm kép
     "VEHICLE_OBJECT_COLLISION": 2,   # Xe va chạm vật thể/người: sustained ngắn vì tương tác nhanh
+    "VEHICLE_EXTERNAL_IMPACT": 2,    # Vật dụng bên ngoài tác động vào xe (đã xét xe bình thường trước)
     "OBJECT_FALLING_ON_VEHICLE": 3,  # Vật thể rơi vào xe: cần xác nhận nhiều frame (rơi + đáp)
     "VEHICLE_STOP_ANOMALY": 3,          # Rule hard_stop đã tự sustained (VEHICLE_HARD_STOP_SUSTAINED=3); confirm thấp để không bỏ sót
     "VEHICLE_ACCIDENT": 1,           # Rule vehicle_state đã tự sustained (VEHICLE_TILT_SUSTAINED=3); confirm=1 để khỏi đếm kép
     "FIRE_DETECTED": 0,              # Smoke/fire dùng persistence riêng
-    "SMOKE_DETECTED": 0,
-    "RESTRICTED_INTRUSION": 3,
 }
 
 # ============================================================
@@ -195,6 +232,33 @@ CONFLICT_FALL_SCORE_BONUS = 5.0
 
 # Điểm kết hợp (cho confidence)
 CONFLICT_KINETIC_THRESH = 12.0       # Kinetic score threshold
+
+# ============================================================
+# CONFLICT / FIGHT — ĐỊNH NGHĨA LẠI theo 3 YẾU TỐ + HẬU QUẢ
+# LÝ THUYẾT:
+#   XÔ XÁT / ĐÁNH NHAU (gồm: đánh nhau thực tế, xô đẩy/giằng co, đánh võ
+#   biểu diễn, đánh vật biểu diễn) = tương tác xung đột giữa 2+ người có
+#   VẬN ĐỘNG THỂ CHẤT DỮ DỘI.
+#   ÔM NHAU / THÂN NHAU (yêu thương) = gần gũi nhưng vận động CHẬM, không
+#   có hành vi tấn công → KHÔNG phải xô xát.
+# BÓC TÁCH 3 YẾU TỐ:
+#   1. BODY KINETIC — tốc độ di chuyển cơ thể (normalized theo chiều cao)
+#      hoặc 2 người lao vào nhau nhanh (approach/closing). Đánh nhau = nhanh;
+#      ôm/thân = chậm hoặc đứng yên.
+#   2. AGGRESSION — vung tay nhanh/biên độ lớn HƯỚNG VÀO người kia, đá/gạt
+#      chân (ankle 15/16), ngã nhanh, nằm vật. Võ/vật biểu diễn vẫn có tín
+#      hiệu này → vẫn được báo.
+#   3. APPROACH — closing speed (2 người lao vào nhau).
+# HẬU QUẢ (≈70% vụ xô xát): 1 bên ngã rồi NẰM LÂU KHÔNG DẬY → bonus mạnh,
+#   xác nhận ngay cả khi bắt sót vung tay.
+# KẾT LUẬN: (Aggression ∨ Aftermath) ∧ (Kinetic ∨ Aftermath).
+# ============================================================
+CONFLICT_BODY_SPEED_THRESH = 0.8        # Tốc độ cơ thể norm (px/s / chiều cao) — vượt đi bộ
+CONFLICT_CLOSING_NORM_THRESH = 0.6      # Closing speed norm — lao vào nhau nhanh
+CONFLICT_WRIST_ALIGNMENT_THRESH = 20.0  # Thành phần vận tốc cổ tay HƯỚNG VÀO người kia (px/s)
+CONFLICT_LEG_KICK_THRESH = 18.0         # Tốc độ cổ chân/ankle (px/s) — cú đá/gạt chân
+CONFLICT_LYING_SUSTAINED_FRAMES = 4     # Nằm ≥ N detection frame = "nằm lâu không dậy"
+CONFLICT_AFTERMATH_BONUS = 3.5          # Bonus điểm khi có hậu quả (ngã không dậy)
 
 # ============================================================
 # VEHICLE ↔ OBJECT COLLISION — Xe va chạm vật thể / người
@@ -287,6 +351,21 @@ VEHICLE_TILT_SCORE_THRESH = 0.60            # Điểm tối thiểu để báo V
 VEHICLE_CRUSH_COVERAGE_THRESH = 0.55        # Vật khác phủ >= 55% diện tích bbox xe
 VEHICLE_CRUSH_SUSTAINED = 4                 # Duy trì bị đè >= N frames
 VEHICLE_CRUSH_SCORE_THRESH = 0.60           # Điểm tối thiểu để báo bị đè
+
+# ============================================================
+# EXTERNAL IMPACT — Vật dụng bên ngoài tác động vào xe
+# Yêu cầu: TRƯỚC đó phải xác định xe BÌNH THƯỜNG (baseline) rồi mới
+# kết luận va chạm do vật dụng bên ngoài gây ra.
+# ============================================================
+VEHICLE_EXTERNAL_IMPACT_SUSTAINED = 4       # Duy trì tín hiệu >= N frames
+VEHICLE_EXTERNAL_IMPACT_NORMAL_WINDOW = 8   # Cửa sổ lịch sử xét xe bình thường
+VEHICLE_EXTERNAL_IMPACT_MIN_SPEED = 4.0     # Xe phải đang chuyển động trước khi bị tác động
+VEHICLE_EXTERNAL_IMPACT_IOU_THRESH = 0.05   # Vật dụng trùm/che bbox xe
+VEHICLE_EXTERNAL_IMPACT_PROXIMITY_DIST_RATIO = 0.45  # Vật dụng tiếp cận sát xe
+VEHICLE_EXTERNAL_IMPACT_TILT_THRESH = 0.40  # Hậu tác động: xe nghiêng/lật
+VEHICLE_EXTERNAL_IMPACT_DIR_CHANGE_THRESH = 0.8  # Hậu tác động: đổi hướng đột ngột
+VEHICLE_EXTERNAL_IMPACT_IMPACT_THRESH = 0.35 # Hậu tác động: giảm tốc/dừng gấp
+VEHICLE_EXTERNAL_IMPACT_SCORE_THRESH = 0.55 # Điểm tối thiểu để báo
 
 # ============================================================
 # VEHICLE HARD STOP

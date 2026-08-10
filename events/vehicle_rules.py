@@ -35,6 +35,7 @@ class VehicleAccidentRules:
         self.hard_stop_state = {}     # track_id -> sustained_count
         self.vehicle_state = {}       # track_id -> sustained_count (nghiêng/lật)
         self.crush_state = {}         # (min_id, max_id) -> sustained_count (bị đè)
+        self.external_impact_state = {}  # (min_id, max_id) -> sustained_count
         self.pair_dist_hist = {}      # (min_id, max_id) -> deque(distances)
         self.pair_contact_frame = {}  # (min_id, max_id) -> frame gần nhất đạt proximity
 
@@ -262,6 +263,126 @@ class VehicleAccidentRules:
                         and self.object_collision_state.get(pair_key, 0)
                         >= config.VEHICLE_OBJECT_SUSTAINED)
         return is_confirmed, score
+
+    def check_external_impact(self, objV, objO):
+        """Xe va chạm do VẬT DỤNG BÊN NGOÀI tác động (VEHICLE_EXTERNAL_IMPACT).
+
+        Khác check_object_collision (2 vật tiến lại gần nhau từ động học chung):
+        ở đây xe đang chạy BÌNH THƯỜNG thì bị vật dụng bên ngoài (thùng hàng,
+        biển báo, mảnh vỡ, vật thể...) tiếp cận/trùm lên trong quá trình chuyển
+        động → sau đó xe xuất hiện tình trạng bất thường.
+
+        Pipeline 3 GIAI ĐOẠN:
+          Stage 0 — XÁC ĐỊNH XE BÌNH THƯỜNG TRƯỚC (bắt buộc):
+              Phần ĐẦU cửa sổ lịch sử (trước thời điểm nghi vấn): xe có aspect
+              ratio ổn định quanh baseline (không nghiêng/lật) và đang chuyển
+              động → mới được coi là "xe bình thường". Nếu xe đã lật/dừng trước
+              đó → KHÔNG thuộc trường hợp này.
+          Stage 1 — VẬT DỤNG BÊN NGOÀI tiếp cận / trùm lên xe (proximity gate).
+          Stage 2 — HẬU TÁC ĐỘNG: tại thời điểm hiện tại xe xuất hiện tình trạng
+              bất thường (nghiêng/lật, đổi hướng đột ngột, giảm tốc/dừng gấp).
+          Duy trì >= VEHICLE_EXTERNAL_IMPACT_SUSTAINED frame → kết luận.
+        """
+        window = config.VEHICLE_EXTERNAL_IMPACT_NORMAL_WINDOW
+        if (len(objV.bbox_history) < window
+                or len(objV.velocity_history) < 4):
+            return False, 0.0
+
+        boxV, boxO = objV.bbox_history[-1], objO.bbox_history[-1]
+        pair_key = (min(objV.track_id, objO.track_id),
+                    max(objV.track_id, objO.track_id))
+
+        # ---- Stage 0: xe phải BÌNH THƯỜNG TRƯỚC (baseline) ----
+        was_normal = self._was_vehicle_normal(objV)
+
+        # ---- Stage 1: vật dụng bên ngoài tiếp cận / trùm lên xe ----
+        diagV = np.sqrt((boxV[2] - boxV[0]) ** 2 + (boxV[3] - boxV[1]) ** 2)
+        diagO = np.sqrt((boxO[2] - boxO[0]) ** 2 + (boxO[3] - boxO[1]) ** 2)
+        avg_diag = max((diagV + diagO) / 2.0, 1e-5)
+        centV = np.array(objV.center_history[-1])
+        centO = np.array(objO.center_history[-1])
+        dist = float(np.linalg.norm(centV - centO))
+        rel_dist = dist / avg_diag
+        iou = self._calculate_iou(boxV, boxO)
+        is_near = (iou > config.VEHICLE_EXTERNAL_IMPACT_IOU_THRESH
+                   or rel_dist < config.VEHICLE_EXTERNAL_IMPACT_PROXIMITY_DIST_RATIO)
+
+        # ---- Stage 2: xe hiện tại BẤT THƯỜNG (hậu tác động) ----
+        cond = self._assess_vehicle_condition(objV)
+        tilt_now = cond["tilt"]
+        dir_now = cond["dir_change"]
+        impact_now = cond["impact"]
+        abnormal = (
+            tilt_now > config.VEHICLE_EXTERNAL_IMPACT_TILT_THRESH
+            or dir_now > config.VEHICLE_EXTERNAL_IMPACT_DIR_CHANGE_THRESH
+            or impact_now > config.VEHICLE_EXTERNAL_IMPACT_IMPACT_THRESH
+        )
+
+        is_candidate = was_normal and is_near and abnormal
+
+        # Temporal sustained confirmation
+        if is_candidate:
+            self.external_impact_state[pair_key] = min(
+                config.VEHICLE_EXTERNAL_IMPACT_SUSTAINED + 2,
+                self.external_impact_state.get(pair_key, 0) + 1,
+            )
+        else:
+            self.external_impact_state[pair_key] = max(
+                0, self.external_impact_state.get(pair_key, 0) - 1
+            )
+
+        # Điểm: mức bất thường của xe (0.6) + mức tiếp cận của vật dụng (0.4)
+        score = min(0.98, 0.5
+                    + max(tilt_now, impact_now) * 0.35
+                    + dir_now * 0.1
+                    + min(1.0, 1.0 - rel_dist
+                          / config.VEHICLE_EXTERNAL_IMPACT_PROXIMITY_DIST_RATIO) * 0.05)
+
+        is_confirmed = (is_candidate
+                        and self.external_impact_state.get(pair_key, 0)
+                        >= config.VEHICLE_EXTERNAL_IMPACT_SUSTAINED
+                        and score >= config.VEHICLE_EXTERNAL_IMPACT_SCORE_THRESH)
+        return is_confirmed, score
+
+    def _was_vehicle_normal(self, obj):
+        """Stage 0 — Xác định xe BÌNH THƯỜNG trước khi bị vật dụng bên ngoài tác động.
+
+        Dùng NỬA ĐẦU cửa sổ lịch sử (thời điểm TRƯỚC nghi vấn hiện tại):
+          - Aspect ratio ổn định quanh baseline riêng của xe (không nghiêng/lật).
+          - Xe ĐANG CHUYỂN ĐỘNG (không phải xe đậu/đã dừng).
+        Chỉ trả True khi cả 2 điều kiện thỏa — đây là tiền đề bắt buộc.
+        """
+        window = config.VEHICLE_EXTERNAL_IMPACT_NORMAL_WINDOW
+        half = max(1, window // 2)
+        early_boxes = list(obj.bbox_history)[-window:-half]
+        if len(early_boxes) < 2:
+            return False
+
+        aspects = []
+        for box in early_boxes:
+            w = box[2] - box[0]
+            h = box[3] - box[1]
+            if h < 1e-5:
+                continue
+            aspects.append(w / h)
+        if not aspects:
+            return False
+
+        baseline = float(np.median(aspects))
+        current = aspects[-1]
+        if baseline < 1e-5:
+            return False
+        tilt_dev = abs(current - baseline) / baseline
+        aspect_ok = tilt_dev < config.VEHICLE_TILT_ASPECT_RATIO_DEVIATION
+
+        # Xe đang chuyển động trong nửa đầu cửa sổ (trước khi bị tác động)
+        if len(obj.velocity_history) < window:
+            return False
+        speeds = [np.linalg.norm(v)
+                  for v in list(obj.velocity_history)[-window:-half]]
+        moving = bool(speeds) and max(speeds) > config.VEHICLE_EXTERNAL_IMPACT_MIN_SPEED
+
+        return aspect_ok and moving
 
     def check_object_falling(self, objV, objO):
         """Vật thể rơi từ trên xuống trúng xe (OBJECT_FALLING_ON_VEHICLE).
@@ -701,6 +822,13 @@ class VehicleAccidentRules:
                       if k[0] not in active_track_ids or k[1] not in active_track_ids]
         for k in lost_crush:
             del self.crush_state[k]
+
+        # External impact state (vật dụng bên ngoài tác động vào xe)
+        lost_ext = [k for k in self.external_impact_state
+                    if k[0] not in active_track_ids
+                    or k[1] not in active_track_ids]
+        for k in lost_ext:
+            del self.external_impact_state[k]
 
         for k in lost_pairs:
             self.pair_dist_hist.pop(k, None)

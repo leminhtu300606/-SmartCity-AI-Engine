@@ -275,12 +275,23 @@ class SmokeFireRules:
         roi_area = cv2.countNonZero(roi_mask)
 
         # ==========================================================
+        # SMOKE — CHỈ LÀ ĐIỀU KIỆN HỖ TRỢ cho việc xác định lửa
+        # (không còn emit event SMOKE_DETECTED riêng). Điểm khói được
+        # truyền vào các pipeline lửa để tăng confidence khi lửa + khói.
+        # ==========================================================
+        smoke_score = self._compute_smoke_state(
+            zone_name, roi_mask, hsv, smoke_mask,
+            roi_area, smoke_px_thresh, min_contour,
+        )
+
+        # ==========================================================
         # FIRE PIPELINE — lửa nhìn trực tiếp
         # ==========================================================
         fire_ev = self._fire_pipeline(
             zone_name, roi_mask, bbox, hsv, fire_mask,
             roi_area, fire_px_thresh, min_contour,
             object_bboxes=object_bboxes,
+            smoke_score=smoke_score,
         )
         has_direct_fire = fire_ev is not None
         if fire_ev is not None:
@@ -296,6 +307,7 @@ class SmokeFireRules:
                 config.SMOKE_FIRE_SMALL_FIRE_PIXEL_THRESH,
                 config.SMOKE_FIRE_SMALL_FIRE_MIN_CONTOUR,
                 object_bboxes=object_bboxes,
+                smoke_score=smoke_score,
             )
             if small_ev is not None:
                 events.append(small_ev)
@@ -312,19 +324,10 @@ class SmokeFireRules:
                 config.SMOKE_FIRE_GLOW_MIN_PIXELS,
                 config.SMOKE_FIRE_GLOW_MIN_CONTOUR,
                 object_bboxes=object_bboxes,
+                smoke_score=smoke_score,
             )
             if glow_ev is not None:
                 events.append(glow_ev)
-
-        # ==========================================================
-        # SMOKE PIPELINE
-        # ==========================================================
-        smoke_ev = self._smoke_pipeline(
-            zone_name, roi_mask, bbox, hsv, smoke_mask,
-            roi_area, smoke_px_thresh, min_contour,
-        )
-        if smoke_ev is not None:
-            events.append(smoke_ev)
 
         return events
 
@@ -333,7 +336,7 @@ class SmokeFireRules:
     # ----------------------------------------------------------------
     def _fire_pipeline(self, zone_name, roi_mask, bbox, hsv, fire_mask,
                        roi_area, fire_px_thresh, min_contour,
-                       object_bboxes=None):
+                       object_bboxes=None, smoke_score=0.0):
         """Fire: STAGE 1 (detection) → STAGE 2 (persistence)
         → STAGE 3 (growth) → STAGE 4 (event)."""
         fire_in_roi = cv2.bitwise_and(fire_mask, roi_mask)
@@ -439,12 +442,14 @@ class SmokeFireRules:
             self._mark_alert(zone_name)
             conf = min(0.98, 0.90 + growth
                        + min(fire_class_score, 1.0) * 0.06
-                       + min(fire_contrast / 300.0, 0.03))
+                       + min(fire_contrast / 300.0, 0.03)
+                       + smoke_score * 0.05)
             fire_ev = {
                 "event_type": "FIRE_DETECTED",
                 "zone_name": zone_name,
                 "confidence": conf,
-                "description": f"Phát hiện đám cháy tại ô {zone_name}",
+                "description": (f"Phát hiện đám cháy tại ô {zone_name}"
+                                + (" (kèm khói)" if smoke_score > 0 else "")),
             }
             if bbox is not None:
                 fire_ev["bbox"] = bbox
@@ -455,7 +460,8 @@ class SmokeFireRules:
     # SMALL FIRE — điểm cháy nhỏ / lửa bị che khuất MỘT PHẦN
     # ----------------------------------------------------------------
     def _small_fire_pipeline(self, zone_name, roi_mask, bbox, hsv, fire_mask,
-                             px_thresh, min_contour, object_bboxes=None):
+                             px_thresh, min_contour, object_bboxes=None,
+                             smoke_score=0.0):
         """Lửa NHỎ (vài chục pixel) hoặc lửa chỉ lộ ra ít pixel sau vật cản.
 
         Ngọn lửa nhỏ vẫn giữ bản chất lửa:
@@ -524,8 +530,10 @@ class SmokeFireRules:
                 "zone_name": zone_name,
                 "confidence": min(0.97, 0.90
                                   + min(flicker_freq, 1.0) * 0.06
-                                  + min(hue_spread, 1.0) * 0.03),
-                "description": f"Phát hiện điểm cháy nhỏ tại ô {zone_name}",
+                                  + min(hue_spread, 1.0) * 0.03
+                                  + smoke_score * 0.05),
+                "description": (f"Phát hiện điểm cháy nhỏ tại ô {zone_name}"
+                                + (" (kèm khói)" if smoke_score > 0 else "")),
             }
             if bbox is not None:
                 fire_ev["bbox"] = bbox
@@ -614,7 +622,8 @@ class SmokeFireRules:
     # FIRE GLOW — lửa bị che khuất hoàn toàn (tường, container, bờ kè...)
     # ----------------------------------------------------------------
     def _fire_glow_pipeline(self, zone_name, roi_mask, bbox, hsv, glow_mask,
-                            px_thresh, min_contour, object_bboxes=None):
+                            px_thresh, min_contour, object_bboxes=None,
+                            smoke_score=0.0):
         """Quầng sáng ấm hắt ra vật cản — bản thân ngọn lửa không hiện rõ.
 
         Lửa ẩn sau tường vẫn:
@@ -680,9 +689,12 @@ class SmokeFireRules:
                 "zone_name": zone_name,
                 "confidence": min(0.96, 0.90
                                   + min(flicker_freq, 1.0) * 0.05
-                                  + min(hue_spread, 1.0) * 0.04),
+                                  + min(hue_spread, 1.0) * 0.04
+                                  + smoke_score * 0.05),
                 "description":
-                    f"Phát hiện quầng sáng cháy (lửa có thể bị che khuất) tại ô {zone_name}",
+                    (f"Phát hiện quầng sáng cháy (lửa có thể bị che khuất) "
+                     f"tại ô {zone_name}"
+                     + (" (kèm khói)" if smoke_score > 0 else "")),
             }
             if bbox is not None:
                 glow_ev["bbox"] = bbox
@@ -690,29 +702,31 @@ class SmokeFireRules:
         return None
 
     # ----------------------------------------------------------------
-    # STAGE 1: SMOKE visual detection + feature extraction
+    # STAGE 1: SMOKE — chỉ là ĐIỀU KIỆN hỗ trợ xác định lửa
     # ----------------------------------------------------------------
-    def _smoke_pipeline(self, zone_name, roi_mask, bbox, hsv, smoke_mask,
-                        roi_area, smoke_px_thresh, min_contour):
-        """Smoke: STAGE 1 (detection) → STAGE 2 (persistence)
-        → STAGE 3 (growth/spread) → STAGE 4 (event)."""
+    def _compute_smoke_state(self, zone_name, roi_mask, hsv, smoke_mask,
+                             roi_area, smoke_px_thresh, min_contour):
+        """Khói — KHÔNG còn là event riêng (bỏ SMOKE_DETECTED).
+
+        Khói chỉ dùng làm ĐIỀU KIỆN để quyết định lửa: kết quả là điểm
+        smoke_score (0..1) dựa trên tín hiệu khói duy trì (persistence).
+        Điểm này được truyền vào các pipeline lửa để tăng confidence khi
+        xuất hiện đồng thời lửa + khói (bản chất cháy thật).
+        """
         smoke_in_roi = cv2.bitwise_and(smoke_mask, roi_mask)
         smoke_pixels = self._count_significant_contours(
             smoke_in_roi, min_area=min_contour)
 
-        # STAGE 1 — Visual features. Grayscale chỉ phụ trợ cho khói
-        # (softness / frame diff), không grayscale toàn pipeline.
+        # Grayscale chỉ phụ trợ cho khói (softness / frame diff)
         gray = self._gray_from_hsv(hsv)
-
         smoke_change = self._compute_smoke_change(zone_name, gray, roi_mask)
         smoke_softness = self._compute_smoke_softness(
             smoke_in_roi, gray, min_area=min_contour)
         shape_change, spread = self._compute_smoke_shape_change(
             zone_name, smoke_in_roi)
-
         smoke_ratio = smoke_pixels / max(roi_area, 1)
 
-        # STAGE 1 signal = đủ pixel + mờ (dạng mây) + đổi hình/lan tỏa + frame diff
+        # Tín hiệu khói = đủ pixel + mờ (dạng mây) + đổi hình/lan tỏa + frame diff
         is_smoke_signal = (
             smoke_pixels > smoke_px_thresh
             and smoke_softness > config.SMOKE_FIRE_SMOKE_SOFTNESS_THRESH
@@ -733,22 +747,12 @@ class SmokeFireRules:
                 0, self.smoke_persistence_map.get(zone_name, 0) - 1
             )
 
-        # STAGE 4 — SMOKE EVENT (STAGE 3: shape_change/spread đã tính ở trên)
+        # Chỉ coi là có khói khi tín hiệu duy trì đủ frame; độ mạnh dựa
+        # trên độ mờ và độ lan tỏa (khói đặc/đang lan = cháy rõ hơn).
         if (self.smoke_persistence_map.get(zone_name, 0)
-                >= config.SMOKE_FIRE_SMOKE_PERSIST_THRESH
-                and self._alert_ready("smoke|" + zone_name)):
-            self._mark_alert("smoke|" + zone_name)
-            smoke_ev = {
-                "event_type": "SMOKE_DETECTED",
-                "zone_name": zone_name,
-                "confidence": min(0.98, 0.90 + smoke_change * 2
-                                  + smoke_softness * 0.2 + spread * 0.5),
-                "description": f"Phát hiện khói bất thường tại ô {zone_name}",
-            }
-            if bbox is not None:
-                smoke_ev["bbox"] = bbox
-            return smoke_ev
-        return None
+                >= config.SMOKE_FIRE_SMOKE_PERSIST_THRESH):
+            return min(1.0, 0.5 + smoke_softness * 0.2 + spread * 0.5)
+        return 0.0
 
     def _gray_from_hsv(self, hsv):
         """Trích kênh V (giá trị/độ sáng) từ HSV làm grayscale phụ trợ.

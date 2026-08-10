@@ -23,8 +23,8 @@ EVENT_COLORS = {
     "OBJECT_FALLING_ON_VEHICLE": "#9c27b0",
     "VEHICLE_STOP_ANOMALY": "#ff9800",
     "VEHICLE_ACCIDENT": "#ff5722",
+    "VEHICLE_EXTERNAL_IMPACT": "#ff6f00",
     "FIRE_DETECTED": "#f44336",
-    "SMOKE_DETECTED": "#607d8b",
     "RESTRICTED_INTRUSION": "#d32f2f",
 }
 
@@ -104,8 +104,8 @@ _INDEX_HTML = """<!DOCTYPE html>
   <button data-type="OBJECT_FALLING_ON_VEHICLE">Vật rơi vào xe</button>
   <button data-type="VEHICLE_STOP_ANOMALY">Xe dừng lạ</button>
   <button data-type="VEHICLE_ACCIDENT">Xe lật/nghiêng</button>
+  <button data-type="VEHICLE_EXTERNAL_IMPACT">Vật dụng va xe</button>
   <button data-type="FIRE_DETECTED">Lửa</button>
-  <button data-type="SMOKE_DETECTED">Khói</button>
   <button data-type="RESTRICTED_INTRUSION">Xâm nhập</button>
 </div>
 

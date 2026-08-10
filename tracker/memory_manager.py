@@ -35,7 +35,7 @@ class ObjectMemoryManager:
                 obj.predicted_bbox = bbox
                 obj.missed_frames += 1
             else:
-                obj.update(bbox, timestamp, pose)
+                obj.update(bbox, timestamp, pose, trk.get("vehicle_type"))
                 obj.predicted_bbox = None
                 obj.missed_frames = 0
                 obj.last_updated_frame = frame_idx

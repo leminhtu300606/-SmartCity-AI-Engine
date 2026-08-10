@@ -12,6 +12,7 @@ class TrackedObjectState:
     def __init__(self, track_id, cls_id, maxlen=30):
         self.track_id = track_id
         self.cls_id = cls_id
+        self.vehicle_type = None  # Loại xe tinh (xe máy, xe tải, xe chở dầu...)
 
         # Short Temporal Buffers
         self.bbox_history = deque(maxlen=maxlen)       # [x1, y1, x2, y2]
@@ -35,10 +36,12 @@ class TrackedObjectState:
         # Các rule sẽ tăng/giảm counter này, chỉ confirm khi vượt ngưỡng.
         self.fall_persist_count = 0
 
-    def update(self, bbox, timestamp, pose=None):
+    def update(self, bbox, timestamp, pose=None, vehicle_type=None):
         cx = (bbox[0] + bbox[2]) / 2.0
         cy = (bbox[1] + bbox[3]) / 2.0
         center = np.array([cx, cy], dtype=np.float32)
+        if vehicle_type is not None:
+            self.vehicle_type = vehicle_type
 
         # 1. Tính Velocity & Acceleration
         if len(self.center_history) > 0:

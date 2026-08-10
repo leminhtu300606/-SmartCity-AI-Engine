@@ -27,10 +27,13 @@ class EventVisualizer:
         # 2. Vẽ Track Bounding Boxes (green: person, yellow: vehicle) + HUD đếm
         cls_names = {
             0: "person",
+            1: "bicycle",
             2: "car",
             3: "motorbike",
             5: "bus",
-            7: "construction_vehicle/truck",
+            6: "train",
+            7: "truck",
+            8: "boat",
         }
         class_counts = {}
         for t_id, obj in memory_manager.visible_objects().items():
@@ -39,11 +42,12 @@ class EventVisualizer:
             if box is None:
                 continue
             class_counts[obj.cls_id] = class_counts.get(obj.cls_id, 0) + 1
+            label = getattr(obj, "vehicle_type", None) or cls_names.get(obj.cls_id, obj.cls_id)
             color = (0, 255, 0) if obj.cls_id == 0 else (0, 255, 255)
             cv2.rectangle(canvas, (box[0], box[1]), (box[2], box[3]), color, 2)
             cv2.putText(
                 canvas,
-                f"ID:{t_id} {cls_names.get(obj.cls_id, obj.cls_id)}",
+                f"ID:{t_id} {label}",
                 (box[0], box[1] - 5),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
@@ -84,14 +88,15 @@ class EventVisualizer:
         for ev in list(active_events):
             box = self._to_int_bbox(ev.get("bbox"))
             if box is not None:
-                if ev["event_type"] in ("FIRE_DETECTED", "SMOKE_DETECTED"):
-                    color = (0, 0, 255)  # đỏ cho lửa/khói
+                if ev["event_type"] == "FIRE_DETECTED":
+                    color = (0, 0, 255)  # đỏ cho lửa
                 elif ev["event_type"] == "HUMAN_CONFLICT":
                     color = (0, 0, 255)
                 elif ev["event_type"] == "HUMAN_GROUP_CONFLICT":
                     color = (0, 0, 200)
                 elif ev["event_type"] in ("VEHICLE_OBJECT_COLLISION",
-                                          "OBJECT_FALLING_ON_VEHICLE"):
+                                          "OBJECT_FALLING_ON_VEHICLE",
+                                          "VEHICLE_EXTERNAL_IMPACT"):
                     color = (255, 0, 255)  # tím cho hành vi/va chạm bổ sung
                 elif ev["event_type"] == "VEHICLE_ACCIDENT":
                     color = (0, 255, 255)  # vàng cyan cho xe lật/nghiêng

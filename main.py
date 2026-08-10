@@ -29,10 +29,13 @@ class CameraWorker(threading.Thread):
         self.active_alert_keys = set()
         self.cls_names = {
             0: "person",
+            1: "bicycle",
             2: "car",
             3: "motorbike",
             5: "bus",
-            7: "construction_vehicle/truck",
+            6: "train",
+            7: "truck",
+            8: "boat",
         }
         self._is_file_source = self._looks_like_file(stream_url)
 
@@ -86,8 +89,9 @@ class CameraWorker(threading.Thread):
                 if not headless:
                     counts = {}
                     for tr in active_tracks:
-                        counts[tr["cls_id"]] = counts.get(tr["cls_id"], 0) + 1
-                    desc = ", ".join(f"{self.cls_names.get(k, k)} x{v}" for k, v in counts.items()) or "none"
+                        label = tr.get("vehicle_type") or self.cls_names.get(tr["cls_id"], tr["cls_id"])
+                        counts[label] = counts.get(label, 0) + 1
+                    desc = ", ".join(f"{k} x{v}" for k, v in counts.items()) or "none"
                     print(f"[{self.camera_id}] frame {frame_idx}: detected {desc}")
             else:
                 active_tracks = self._predict_tracks(timestamp, frame_idx)
