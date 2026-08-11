@@ -8,7 +8,7 @@ import config
 class VehicleTypeClassifier:
     """Phân loại TINH (fine-grained) loại xe từ crop bbox.
 
-    Dùng model YOLO-cls (yolov8n-cls) đã train riêng cho các dạng xe:
+    Dùng model YOLO-cls (yolo11n-cls) đã train riêng cho các dạng xe:
     xe máy, xe tải, xe chở dầu, ô tô con, xe buýt, xe đạp, tàu hỏa...
 
     CHỐNG CHE KHUẤT / XE KHÔNG HOÀN CHỈNH:

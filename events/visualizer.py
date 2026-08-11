@@ -33,7 +33,6 @@ class EventVisualizer:
             5: "bus",
             6: "train",
             7: "truck",
-            8: "boat",
         }
         class_counts = {}
         for t_id, obj in memory_manager.visible_objects().items():
@@ -70,19 +69,6 @@ class EventVisualizer:
         if not has_events:
             return canvas
 
-        # 3b. Vẽ lưới ô nhỏ (grid) cho phát hiện khói/lửa theo từng điểm
-        if config.SMOKE_FIRE_GRID_ENABLED:
-            h, w = canvas.shape[:2]
-            step_x = w / config.SMOKE_FIRE_GRID_COLS
-            step_y = h / config.SMOKE_FIRE_GRID_ROWS
-            grid_color = (100, 100, 100)
-            for i in range(1, config.SMOKE_FIRE_GRID_COLS):
-                x = int(round(i * step_x))
-                cv2.line(canvas, (x, 0), (x, h), grid_color, 1)
-            for j in range(1, config.SMOKE_FIRE_GRID_ROWS):
-                y = int(round(j * step_y))
-                cv2.line(canvas, (0, y), (w, y), grid_color, 1)
-
         # 3c. Vẽ bbox VỊ TRÍ nghi vấn lên khung hình (trước khi dedup banner)
         #     Lửa/khói theo ô: bbox = ô grid. Đánh nhau/va chạm: bbox = vùng 2 đối tượng.
         for ev in list(active_events):
@@ -92,14 +78,6 @@ class EventVisualizer:
                     color = (0, 0, 255)  # đỏ cho lửa
                 elif ev["event_type"] == "HUMAN_CONFLICT":
                     color = (0, 0, 255)
-                elif ev["event_type"] == "HUMAN_GROUP_CONFLICT":
-                    color = (0, 0, 200)
-                elif ev["event_type"] in ("VEHICLE_OBJECT_COLLISION",
-                                          "OBJECT_FALLING_ON_VEHICLE",
-                                          "VEHICLE_EXTERNAL_IMPACT"):
-                    color = (255, 0, 255)  # tím cho hành vi/va chạm bổ sung
-                elif ev["event_type"] == "VEHICLE_ACCIDENT":
-                    color = (0, 255, 255)  # vàng cyan cho xe lật/nghiêng
                 else:
                     color = (0, 165, 255)  # cam cho va chạm/ngã/xâm nhập
                 cv2.rectangle(canvas, (box[0], box[1]), (box[2], box[3]), color, 2)

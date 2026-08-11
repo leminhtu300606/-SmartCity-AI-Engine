@@ -16,14 +16,7 @@ from dashboard.store import AlertStore
 EVENT_COLORS = {
     "HUMAN_FALL": "#ff9800",
     "HUMAN_CONFLICT": "#f44336",
-  "HUMAN_GROUP_CONFLICT": "#c62828",
-    "PERSON_COLLISION": "#ff5722",
     "VEHICLE_COLLISION": "#ff9800",
-    "VEHICLE_OBJECT_COLLISION": "#ffc107",
-    "OBJECT_FALLING_ON_VEHICLE": "#9c27b0",
-    "VEHICLE_STOP_ANOMALY": "#ff9800",
-    "VEHICLE_ACCIDENT": "#ff5722",
-    "VEHICLE_EXTERNAL_IMPACT": "#ff6f00",
     "FIRE_DETECTED": "#f44336",
     "RESTRICTED_INTRUSION": "#d32f2f",
 }
@@ -97,14 +90,7 @@ _INDEX_HTML = """<!DOCTYPE html>
   <button class="active" data-type="ALL">Tất cả</button>
   <button data-type="HUMAN_FALL">Người ngã</button>
   <button data-type="HUMAN_CONFLICT">Xô xát</button>
-  <button data-type="HUMAN_GROUP_CONFLICT">Cụm 3 người</button>
-  <button data-type="PERSON_COLLISION">Người va chạm</button>
   <button data-type="VEHICLE_COLLISION">Xe-xe</button>
-  <button data-type="VEHICLE_OBJECT_COLLISION">Xe-vật thể</button>
-  <button data-type="OBJECT_FALLING_ON_VEHICLE">Vật rơi vào xe</button>
-  <button data-type="VEHICLE_STOP_ANOMALY">Xe dừng lạ</button>
-  <button data-type="VEHICLE_ACCIDENT">Xe lật/nghiêng</button>
-  <button data-type="VEHICLE_EXTERNAL_IMPACT">Vật dụng va xe</button>
   <button data-type="FIRE_DETECTED">Lửa</button>
   <button data-type="RESTRICTED_INTRUSION">Xâm nhập</button>
 </div>

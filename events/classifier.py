@@ -13,7 +13,6 @@ _VEHICLE_NAMES = {
     5: "xe buýt",
     6: "tàu hỏa",
     7: "xe tải",
-    8: "thuyền",
 }
 
 
@@ -25,13 +24,22 @@ def name_of(obj):
 
 
 class RuleBasedEventClassifier:
-    """Classifier tổng hợp gom toàn bộ 4 logic sự kiện.
+    """Classifier tổng hợp theo pipeline Phase 1 (4 nhóm event).
 
-    Cải tiến:
+    Pipeline:
+      ByteTrack / OC-SORT  →  Temporal State / History  →  Pose Analysis +
+      Motion Analysis  →  Rule-based Classifier  →  Event Score / Confirm
+      →  Alert + Metadata.
+
+    Phase 1 chỉ tập trung 4 event:
+      1. Person fall / conflict   (HUMAN_FALL, HUMAN_CONFLICT)
+      2. Vehicle collision        (VEHICLE_COLLISION — xe-xe)
+      3. Smoke / Fire             (FIRE_DETECTED)
+      4. Restricted-zone intrusion(RESTRICTED_INTRUSION)
+
     - Object-based rules CHỈ chạy trên detection frame (dữ liệu kinematic mới).
     - Visual pattern rules (smoke/fire) chạy MỌI frame (tận dụng temporal analysis).
     - Cleanup lost track state tự động.
-    - Tách biệt detection frame vs predicted frame để confirm counter chính xác.
     """
 
     def __init__(self):
@@ -52,17 +60,14 @@ class RuleBasedEventClassifier:
             memory_manager: ObjectMemoryManager chứa temporal history.
             frame_bgr: Frame BGR gốc.
             is_detection_frame: True nếu frame này có detection thật (không phải predicted).
-                Object-based rules chỉ chạy trên detection frame để tránh đếm trùng
-                khi confirm. Smoke/Fire chạy mọi frame.
             frame_idx: Số thứ tự frame.
         """
         candidates = []
         rois = config.CAMERA_ROIS.get(camera_id, [])
 
         # ============================================================
-        # Logic 3: Smoke / Fire — chạy MỌI frame
+        # Smoke / Fire — chạy MỌI frame
         # Visual pattern analysis hưởng lợi từ flicker detection frame-to-frame.
-        # Persistence logic bên trong SmokeFireRules tự quản lý temporal.
         # Truyền bbox NGƯỜI (cls 0) để loại áo quần đỏ/cam (không phải lửa).
         # ============================================================
         person_bboxes = [
@@ -78,268 +83,122 @@ class RuleBasedEventClassifier:
 
         # ============================================================
         # Object-based rules — CHỈ chạy trên DETECTION frame
-        # Trên predicted frame, kinematic data không đổi → đếm trùng confirm counter.
-        # Bỏ qua predicted frame để confirm 1:1 với detection thật.
         # ============================================================
         if is_detection_frame:
             objects = list(memory_manager.visible_objects().values())
             active_ids = set(obj.track_id for obj in objects)
-
-            # ============================================================
-            # BƯỚC 0: XÁC ĐỊNH RÕ SỐ LƯỢNG NGƯỜI TRƯỚC
-            # Số lượng người quyết định các bước phân tích NGƯỜI phía sau:
-            #   - 1 người   : chỉ phân tích ĐƠN (ngã) — không có tương tác.
-            #   - 2 người   : phân tích theo CẶP (xô xát, va chạm người).
-            #   - >= 3 người: thêm phân tích CỤM (xô xát nhóm nhiều người).
-            # ============================================================
             persons = [obj for obj in objects if obj.cls_id == 0]
-            num_persons = len(persons)
 
             # --------------------------------------------------------
-            # Single-Object Analysis
+            # Single-Object Analysis (person)
             # --------------------------------------------------------
             for obj in objects:
-                # Logic 4: Intrusion (mọi class 0)
+                # Intrusion (chỉ person)
                 candidates.extend(
                     self.intrusion_rules.check_intrusion(obj, rois)
                 )
 
-                # Logic 1: Person fall & gesture (class 0)
-                if obj.cls_id == 0:
-                    if self.person_rules.check_fall(obj):
+                # Person fall (chỉ person)
+                if obj.cls_id == 0 and self.person_rules.check_fall(obj):
+                    candidates.append({
+                        "event_type": "HUMAN_FALL",
+                        "track_ids": [obj.track_id],
+                        "bbox": self._get_bbox(obj),
+                        "confidence": 0.90,
+                        "description": "Phát hiện người bị ngã",
+                        "evidence_objects": [self._object_evidence(obj)],
+                    })
+
+                # Xe ĐƠN bị BIẾN DẠNG (thay đổi so với ban đầu) = tai nạn.
+                # Tín hiệu độc lập: không cần cặp xe thứ 2 — bắt xe lật/đâm vật
+                # cản/va vào đối tượng không được track. Đã loại trừ che khuất
+                # (màn hình cắt / vật thể khác che).
+                if obj.cls_id in config.VEHICLE_CLASSES:
+                    other_bboxes = [
+                        o.bbox_history[-1]
+                        for o in objects
+                        if o.track_id != obj.track_id
+                    ]
+                    is_deformed, deform_score = \
+                        self.vehicle_rules.check_deformation(
+                            obj, other_bboxes=other_bboxes,
+                            frame_size=config.MODEL_INPUT_SIZE)
+                    if is_deformed:
                         candidates.append({
-                            "event_type": "HUMAN_FALL",
+                            "event_type": "VEHICLE_COLLISION",
                             "track_ids": [obj.track_id],
                             "bbox": self._get_bbox(obj),
-                            "confidence": 0.90,
-                            "description": "Phát hiện người bị ngã",
+                            "confidence": min(0.93, 0.80 + deform_score * 0.15),
+                            "description":
+                                f"[VA CHẠM GIAO THÔNG] {name_of(obj)} bị "
+                                f"biến dạng đột ngột (thay đổi so với ban đầu)",
                             "evidence_objects": [self._object_evidence(obj)],
                         })
 
-
-                # Logic 2: Vehicle hard stop (class 2,3,5,7)
-                if obj.cls_id in config.VEHICLE_CLASSES:
-                    if self.vehicle_rules.check_hard_stop(obj):
+            # --------------------------------------------------------
+            # Person Interaction — XÔ XÁT / ĐÁNH NHAU (cặp người)
+            # Dụng cụ (TOOL): object không phải người và không phải phương tiện
+            # (chai, gậy, ghế, túi...) chuyển động nhanh gần người → kênh tầm xa.
+            # --------------------------------------------------------
+            tool_objects = [
+                obj for obj in objects
+                if obj.cls_id != 0 and obj.cls_id not in config.VEHICLE_CLASSES
+            ]
+            for i in range(len(persons)):
+                for j in range(i + 1, len(persons)):
+                    oA, oB = persons[i], persons[j]
+                    centA = oA.center_history[-1]
+                    zone_a = config.grid_zone(centA[0], centA[1])
+                    is_conflict, score = self.person_rules.check_conflict(
+                        oA, oB, tool_objects=tool_objects)
+                    if is_conflict:
                         candidates.append({
-                            "event_type": "VEHICLE_STOP_ANOMALY",
-                            "track_ids": [obj.track_id],
-                            "bbox": self._get_bbox(obj),
-                            "confidence": 0.90,
+                            "event_type": "HUMAN_CONFLICT",
+                            "track_ids": [oA.track_id, oB.track_id],
+                            "bbox": self._union_bbox(oA, oB),
+                            "confidence": min(1.0, 0.80 + score / 40.0),
                             "description":
-                                "Xe tai nạn / dừng bất thường giữa đường",
-                                "evidence_objects": [self._object_evidence(obj)],
+                                "Phát hiện xô xát/đánh nhau "
+                                "(gồm cả đánh võ/vật biểu diễn)",
+                            "zone_name": f"grid_{zone_a}",
+                            "evidence_objects": [
+                                self._object_evidence(oA),
+                                self._object_evidence(oB),
+                            ],
                         })
 
-                    # Stage 1: xác định TÌNH TRẠNG xe — nghiêng/lật (tai nạn 1 xe)
-                    is_tilted, tilt_score = self.vehicle_rules.check_vehicle_state(obj)
-                    if is_tilted:
+            # --------------------------------------------------------
+            # Pairwise Analysis — VEHICLE COLLISION (xe-xe)
+            # --------------------------------------------------------
+            vehicles = [obj for obj in objects if obj.cls_id in config.VEHICLE_CLASSES]
+            frame_size = config.MODEL_INPUT_SIZE
+            for i in range(len(vehicles)):
+                for j in range(i + 1, len(vehicles)):
+                    oA, oB = vehicles[i], vehicles[j]
+                    # Bbox các vật thể KHÁC (ngoài cặp) để loại trừ che khuất —
+                    # xe bị vật khác che → bbox méo nhưng không phải biến dạng
+                    # do tai nạn (chống false positive từ occlusion).
+                    other_bboxes = [
+                        o.bbox_history[-1]
+                        for o in objects
+                        if o.track_id != oA.track_id and o.track_id != oB.track_id
+                    ]
+                    is_collision, c_score = self.vehicle_rules.check_collision(
+                        oA, oB, other_bboxes=other_bboxes, frame_size=frame_size)
+                    if is_collision:
                         candidates.append({
-                            "event_type": "VEHICLE_ACCIDENT",
-                            "track_ids": [obj.track_id],
-                            "bbox": self._get_bbox(obj),
-                            "confidence": min(0.95, tilt_score),
+                            "event_type": "VEHICLE_COLLISION",
+                            "track_ids": [oA.track_id, oB.track_id],
+                            "bbox": self._union_bbox(oA, oB),
+                            "confidence": min(0.98, 0.75 + c_score * 0.25),
                             "description":
-                                "Phát hiện xe nghiêng/lật (nghi tai nạn)",
+                                f"[VA CHẠM GIAO THÔNG] {name_of(oA)} và "
+                                f"{name_of(oB)} va chạm",
+                            "evidence_objects": [
+                                self._object_evidence(oA),
+                                self._object_evidence(oB),
+                            ],
                         })
-
-            # --------------------------------------------------------
-            # Person Interaction — phân nhánh THEO SỐ LƯỢNG NGƯỜI
-            # BƯỚC 0 đã đếm num_persons; chỉ chạy đúng bộ phân tích tương ứng.
-            # --------------------------------------------------------
-
-            # --- Số người >= 2: phân tích theo CẶP người-người ---
-            # (xô xát/đánh nhau + va chạm giữa người)
-            if num_persons >= 2:
-                for i in range(num_persons):
-                    for j in range(i + 1, num_persons):
-                        oA, oB = persons[i], persons[j]
-
-                        # Logic 1: Conflict / Fight (2 person)
-                        centA = oA.center_history[-1]
-                        zone_a = config.grid_zone(centA[0], centA[1])
-                        is_conflict, score = self.person_rules.check_conflict(
-                            oA, oB
-                        )
-                        if is_conflict:
-                            candidates.append({
-                                "event_type": "HUMAN_CONFLICT",
-                                "track_ids": [oA.track_id, oB.track_id],
-                                "bbox": self._union_bbox(oA, oB),
-                                "confidence": min(1.0, 0.80 + score / 40.0),
-                                "description":
-                                    "Phát hiện xô xát/đánh nhau "
-                                    "(gồm cả đánh võ/vật biểu diễn)",
-                                    "zone_name": f"grid_{zone_a}",
-                                    "evidence_objects": [
-                                        self._object_evidence(oA),
-                                        self._object_evidence(oB),
-                                    ],
-                            })
-
-                        # Person collision (nếu chưa đủ conflict)
-                        is_approach, a_score = (
-                            self.person_rules.check_person_collision(oA, oB)
-                        )
-                        if is_approach and not is_conflict:
-                            candidates.append({
-                                "event_type": "PERSON_COLLISION",
-                                "track_ids": [oA.track_id, oB.track_id],
-                                "bbox": self._union_bbox(oA, oB),
-                                "confidence": a_score,
-                                "description":
-                                    "Phát hiện 2 người tiếp cận nhanh/va chạm",
-                                "zone_name": f"grid_{zone_a}",
-                                "evidence_objects": [
-                                    self._object_evidence(oA),
-                                    self._object_evidence(oB),
-                                ],
-                            })
-
-            # --- Số người >= 3: thêm phân tích CỤM người ---
-            # gom cụm 3 người khi lịch sử ngắn cho thấy họ cùng dính sát
-            # và có ít nhất một người bất thường.
-            # Phân nhóm theo Ô LƯỚI (grid zone): chỉ gom cụm những người
-            # CÙNG vùng — người ở ô khác không tương tác với nhau.
-            if num_persons >= 3:
-                zone_person_map = {}
-                for obj in persons:
-                    cent = obj.center_history[-1]
-                    z = config.grid_zone(cent[0], cent[1])
-                    zone_person_map.setdefault(z, []).append(obj)
-
-                for z, zone_persons in zone_person_map.items():
-                    if len(zone_persons) < 3:
-                        continue
-                    group_confirmed, group_score, group_ids = (
-                        self.person_rules.check_group_conflict(zone_persons)
-                    )
-                    if group_confirmed and group_ids:
-                        group_objs = [
-                            obj for obj in zone_persons
-                            if obj.track_id in group_ids
-                        ]
-                        if group_objs:
-                            candidates.append({
-                                "event_type": config.EVENT_TYPE_HUMAN_GROUP_CONFLICT,
-                                "track_ids": list(group_ids),
-                                "bbox": self._union_many_bboxes(group_objs),
-                                "confidence": min(0.96, group_score),
-                                "description":
-                                    "Phát hiện cụm 3 người tiếp cận/va chạm/xô xát",
-                                "zone_name": f"grid_{z}",
-                                "evidence_objects": [
-                                    self._object_evidence(obj)
-                                    for obj in group_objs
-                                ],
-                            })
-
-            # --------------------------------------------------------
-            # Pairwise Analysis — VEHICLE
-            # Không phụ thuộc số lượng người (xe va chạm xe / vật thể / người)
-            # --------------------------------------------------------
-            n = len(objects)
-            for i in range(n):
-                for j in range(i + 1, n):
-                    oA, oB = objects[i], objects[j]
-
-                    # Logic 2: Vehicle collision
-                    if oA.cls_id in config.VEHICLE_CLASSES or oB.cls_id in config.VEHICLE_CLASSES:
-                        # 2.1) Xe - Xe (cả 2 là phương tiện)
-                        if oA.cls_id in config.VEHICLE_CLASSES and oB.cls_id in config.VEHICLE_CLASSES:
-                            is_collision, c_score = self.vehicle_rules.check_collision(oA, oB)
-                            if is_collision:
-                                candidates.append({
-                                    "event_type": "VEHICLE_COLLISION",
-                                    "track_ids": [oA.track_id, oB.track_id],
-                                    "bbox": self._union_bbox(oA, oB),
-                                    "confidence": min(0.98, 0.75 + c_score * 0.25),
-                                    "description":
-                                        f"Phát hiện TAI NẠN giao thông: "
-                                        f"{name_of(oA)} và {name_of(oB)} va chạm",
-                                    "evidence_objects": [
-                                        self._object_evidence(oA),
-                                        self._object_evidence(oB),
-                                    ],
-                                })
-
-                        # 2.2) Xe - Vật thể / người (chỉ 1 bên là xe)
-                        else:
-                            objV = oA if oA.cls_id in config.VEHICLE_CLASSES else oB
-                            objO = oB if objV is oA else oA
-                            is_obj_collision, oc_score = (
-                                self.vehicle_rules.check_object_collision(objV, objO)
-                            )
-                            if is_obj_collision:
-                                candidates.append({
-                                    "event_type": config.EVENT_TYPE_VEHICLE_OBJECT_COLLISION,
-                                    "track_ids": [oA.track_id, oB.track_id],
-                                    "bbox": self._union_bbox(oA, oB),
-                                    "confidence": min(0.95, 0.70 + oc_score * 0.25),
-                                    "description":
-                                        "Phát hiện xe va chạm vật thể/người",
-                                    "evidence_objects": [
-                                        self._object_evidence(oA),
-                                        self._object_evidence(oB),
-                                    ],
-                                })
-
-                            # Stage 1: xác định TÌNH TRẠNG xe bị ĐÈ/va phải mạnh
-                            is_crushed, crush_score = (
-                                self.vehicle_rules.check_crushed(objV, objO)
-                            )
-                            if is_crushed:
-                                candidates.append({
-                                    "event_type": config.EVENT_TYPE_VEHICLE_OBJECT_COLLISION,
-                                    "track_ids": [oA.track_id, oB.track_id],
-                                    "bbox": self._union_bbox(oA, oB),
-                                    "confidence": min(0.95, crush_score),
-                                    "description":
-                                        "Phát hiện xe bị vật thể/người đè lên "
-                                        "(nghi tai nạn)",
-                                    "evidence_objects": [
-                                        self._object_evidence(oA),
-                                        self._object_evidence(oB),
-                                    ],
-                                })
-
-                            # Stage 2: VẬT DỤNG BÊN NGOÀI tác động vào xe — nhưng
-                            # TRƯỚC đó phải xác định xe BÌNH THƯỜNG (chạy ổn định,
-                            # không lật/dừng) mới kết luận là do vật dụng gây ra.
-                            is_ext_impact, ext_score = (
-                                self.vehicle_rules.check_external_impact(objV, objO)
-                            )
-                            if is_ext_impact:
-                                candidates.append({
-                                    "event_type": config.EVENT_TYPE_VEHICLE_EXTERNAL_IMPACT,
-                                    "track_ids": [oA.track_id, oB.track_id],
-                                    "bbox": self._union_bbox(oA, oB),
-                                    "confidence": min(0.95, 0.70 + ext_score * 0.25),
-                                    "description":
-                                        "Xe đang chạy bình thường bị vật dụng bên "
-                                        "ngoài tác động (nghi tai nạn)",
-                                    "evidence_objects": [
-                                        self._object_evidence(oA),
-                                        self._object_evidence(oB),
-                                    ],
-                                })
-
-                        # 2.3) Vật thể rơi vào xe (cả 2 hướng: xe-vật, vật-xe)
-                        is_falling, f_score = (
-                            self.vehicle_rules.check_object_falling(oA, oB)
-                        )
-                        if is_falling:
-                            candidates.append({
-                                "event_type": config.EVENT_TYPE_OBJECT_FALLING,
-                                "track_ids": [oA.track_id, oB.track_id],
-                                "bbox": self._union_bbox(oA, oB),
-                                "confidence": f_score,
-                                "description":
-                                    "Phát hiện vật thể rơi từ trên xuống trúng xe",
-                                "evidence_objects": [
-                                    self._object_evidence(oA),
-                                    self._object_evidence(oB),
-                                ],
-                            })
 
             # --------------------------------------------------------
             # Cleanup lost track state (giải phóng memory, tránh ghost alert)
@@ -379,19 +238,6 @@ class RuleBasedEventClassifier:
             min(bA[1], bB[1]),
             max(bA[2], bB[2]),
             max(bA[3], bB[3]),
-        ]
-
-    @classmethod
-    def _union_many_bboxes(cls, objects):
-        boxes = [cls._get_bbox(obj) for obj in objects]
-        boxes = [box for box in boxes if box is not None]
-        if not boxes:
-            return None
-        return [
-            min(box[0] for box in boxes),
-            min(box[1] for box in boxes),
-            max(box[2] for box in boxes),
-            max(box[3] for box in boxes),
         ]
 
     @staticmethod

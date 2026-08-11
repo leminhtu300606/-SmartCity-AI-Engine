@@ -35,7 +35,6 @@ class CameraWorker(threading.Thread):
             5: "bus",
             6: "train",
             7: "truck",
-            8: "boat",
         }
         self._is_file_source = self._looks_like_file(stream_url)
 
@@ -56,24 +55,47 @@ class CameraWorker(threading.Thread):
         print(f"[{self.camera_id}] Source: {self.stream_url}"
               + (" (video local)" if self._is_file_source else " (HLS/RTSP stream)"))
         print(f"[{self.camera_id}] Mode: {'HEADLESS (log + snapshot)' if headless else 'GUI (cửa sổ video)'}")
-        cap = self._open_capture()
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
         window_name = f"SmartVision AI Engine - {self.camera_id}"
-        if not headless:
-            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-
         frame_idx = 0
+        retry_log_printed = False
+        cap = None
 
-        while not self.stopped and cap.isOpened():
+        while not self.stopped:
+            # --- Đảm bảo có capture hợp lệ: mở lần đầu hoặc reconnect stream ---
+            if cap is None or not cap.isOpened():
+                if cap is not None:
+                    cap.release()
+                cap = self._open_capture()
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                if not cap.isOpened():
+                    # Stream tạm down / URL sai / mạng không truy cập được.
+                    # Theo logic: worker KHÔNG thoát, cứ thử lại đến khi có nguồn.
+                    if not retry_log_printed:
+                        print(f"[{self.camera_id}] KHÔNG mở được nguồn video: {self.stream_url}")
+                        print(f"[{self.camera_id}] Đợi stream khả dụng... tự động thử lại (nhấn Ctrl+C để dừng).")
+                        retry_log_printed = True
+                    if self._is_file_source:
+                        # File local lỗi -> không thể tự phục hồi, bỏ cuộc ngay.
+                        print(f"[{self.camera_id}] Lỗi file local, dừng worker.")
+                        break
+                    if not headless:
+                        cv2.waitKey(1)
+                    time.sleep(2.0)
+                    continue
+                retry_log_printed = False
+                print(f"[{self.camera_id}] Đã kết nối nguồn video.")
+
+            # --- Đọc frame; nếu rớt stream thì release và quay lại bước mở lại ---
             ret, frame = cap.read()
             if not ret or frame is None:
                 if self._is_file_source:
                     print(f"[{self.camera_id}] Hết video / không đọc được frame. Dừng xử lý.")
                     break
                 print(f"[{self.camera_id}] Stream drop or buffering... Retrying in 1s")
+                cap.release()
+                cap = None
                 time.sleep(1.0)
-                cap.open(self.stream_url, cv2.CAP_FFMPEG)
                 continue
 
             frame_idx += 1
@@ -136,8 +158,13 @@ class CameraWorker(threading.Thread):
                 self.stopped = True
                 break
 
-        cap.release()
-        cv2.destroyWindow(window_name)
+        if cap is not None:
+            cap.release()
+        if not headless:
+            try:
+                cv2.destroyWindow(window_name)
+            except cv2.error:
+                pass
 
     def _log_events(self, events):
         """Log alert khi event lần đầu được xác nhận (tránh spam lặp mỗi frame).

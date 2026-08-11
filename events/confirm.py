@@ -4,8 +4,11 @@ import config
 class EventConfirmTracker:
     """Event Score / Confirm trước khi bắn Alert chính thức.
 
-    Cải tiến: mỗi loại event có ngưỡng confirm riêng (per-event-type thresholds).
-    Smoke/Fire confirm = 0 vì chúng đã có persistence logic riêng bên trong SmokeFireRules.
+    Cải tiến: mỗi loại event có ngưỡng confirm riêng (per-event-type thresholds),
+    nhưng MỌI event phải xuất hiện ít nhất MIN_CONFIRM_FRAMES (>= 2) detection
+    frame trước khi được xác nhận — tránh cảnh báo chỉ từ 1 frame duy nhất.
+    Smoke/Fire, VEHICLE_COLLISION có persistence riêng bên trong rule; ngưỡng
+    tại đây là lớp confirm chung tối thiểu.
     """
 
     def __init__(self, default_frames=4):
@@ -31,9 +34,11 @@ class EventConfirmTracker:
                    ev.get("zone_name"))
             current_keys.add(key)
 
-            # Lấy ngưỡng confirm riêng cho loại event này
-            required = config.EVENT_CONFIRM_MAP.get(
-                ev["event_type"], self.default_frames
+            # Lấy ngưỡng confirm riêng cho loại event này, nhưng KHÔNG thấp
+            # hơn MIN_CONFIRM_FRAMES (2) — mọi hiện tượng cần >= 2 frame.
+            required = max(
+                config.MIN_CONFIRM_FRAMES,
+                config.EVENT_CONFIRM_MAP.get(ev["event_type"], self.default_frames),
             )
 
             # Cap counter tại required + 2 để khi tín hiệu hết,
@@ -43,7 +48,7 @@ class EventConfirmTracker:
                 self.pending_events.get(key, 0) + 1,
             )
 
-            if self.pending_events[key] >= max(required, 1):
+            if self.pending_events[key] >= required:
                 confirmed_events.append(ev)
 
         # Decay / Clean events không còn xuất hiện (chỉ trên detection frame)

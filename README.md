@@ -4,12 +4,12 @@ Hệ thống giám sát thông minh đô thị: nhận diện sự kiện từ *
 
 ## Tính năng
 
-- **4 logic phát hiện sự kiện (Rule-based + Temporal Confirm):**
-  - `HUMAN_ACTION` — người ngã (`HUMAN_FALL`), xô xát (`HUMAN_CONFLICT`), va chạm người (`PERSON_COLLISION`)
-  - `VEHICLE_ACCIDENT` — va chạm (`VEHICLE_COLLISION`), xe nghiêng/lật (`VEHICLE_ACCIDENT`), dừng bất thường (`VEHICLE_STOP_ANOMALY`)
-  - `SMOKE_FIRE` — cháy (`FIRE_DETECTED`), khói (`SMOKE_DETECTED`): phân tích màu HSV + tương phản sáng trên nền tối + tần số nhấp nháy lửa + độ mờ/lan tỏa khói + khói giai đoạn đầu + persistence
-  - `INTRUSION` — xâm nhập vùng cấm (`RESTRICTED_INTRUSION`) bằng điểm trong polygon + thời gian lưu lại (dwell)
-- **Detector YOLOv8 + ByteTrack + Pose keypoints** (17 điểm) để phân tích hành vi.
+- **4 logic phát hiện sự kiện (Rule-based + Temporal Confirm) — Phase 1:**
+  - Person fall / conflict — người ngã (`HUMAN_FALL`), xô xát (`HUMAN_CONFLICT`)
+  - Vehicle collision — va chạm xe-xe (`VEHICLE_COLLISION`)
+  - Smoke / Fire — cháy (`FIRE_DETECTED`): phân tích màu HSV + tương phản sáng trên nền tối + tần số nhấp nháy lửa + khói là điều kiện hỗ trợ
+  - Restricted-zone intrusion — xâm nhập vùng cấm (`RESTRICTED_INTRUSION`) bằng điểm trong polygon + thời gian lưu lại (dwell)
+- **Detector YOLO11n + ByteTrack + Pose keypoints** (17 điểm) để phân tích hành vi.
 - **Tracking dự đoán (constant velocity)** giữa các frame detect nhằm giảm tải CPU; chỉ detection thật mới ghi lịch sử kinematics để tránh cảnh báo sai thời điểm.
 - **Dashboard Web** (Flask): hiển thị danh sách cảnh báo kèm **ảnh snapshot** chụp lại đúng lý do gây cảnh báo, lọc theo event type, tự refresh 2s.
 - Chạy **1 nguồn mỗi lần** (single camera hoặc video local).
@@ -21,8 +21,7 @@ Hệ thống giám sát thông minh đô thị: nhận diện sự kiện từ *
 smartcity_prototype/
 ├── config.py               # Cấu hình stream, model, ROI, ngưỡng sự kiện
 ├── main.py                 # Pipeline chính (CameraWorker, vòng lặp xử lý)
-├── detector.py             # YOLO detect + ByteTrack + pose
-├── tracker/                # Quản lý bộ nhớ object (memory_manager, object_state)
+├── detector.py             # YOLO detect + ByteTrack + pose├── tracker/                # Quản lý bộ nhớ object (memory_manager, object_state)
 ├── events/                 # Các rule phát hiện + confirm + visualizer
 │   ├── person_rules.py
 │   ├── vehicle_rules.py
@@ -32,7 +31,7 @@ smartcity_prototype/
 │   ├── classifier.py
 │   └── visualizer.py
 ├── dashboard/              # Web dashboard: alert + snapshot (store, server)
-└── weights/                # Model: yolov8n.pt, yolov8n-pose.pt
+└── weights/                # Model: yolo11n.pt, yolo11n-pose.pt
 ```
 
 ## Cài đặt
@@ -68,12 +67,12 @@ pip install -r requirements.txt
 
 Đặt 2 file weight vào thư mục `weights/`:
 
-- `yolov8n.pt` — detect
-- `yolov8n-pose.pt` — pose keypoints
+- `yolo11n.pt` — detect
+- `yolo11n-pose.pt` — pose keypoints
 
 ```bash
 # Tải nhanh bằng ultralytics (sau khi cài dependencies)
-python -c "from ultralytics import YOLO; YOLO('yolov8n.pt'); YOLO('yolov8n-pose.pt')"
+python -c "from ultralytics import YOLO; YOLO('yolo11n.pt'); YOLO('yolo11n-pose.pt')"
 # Sau đó copy 2 file vào thư mục weights/
 ```
 
@@ -138,17 +137,12 @@ Tắt/bật trong `config.py`:
 
 Thay đổi ngưỡng phát hiện (ngã, xô xát, va chạm...) ngay trong `config.py`.
 
-## Các event types
+## Các event types (Phase 1)
 
 | Event | Mô tả |
 |---|---|
 | `HUMAN_FALL` | Người ngã (aspect ratio / torso angle + gia tốc rơi) |
 | `HUMAN_CONFLICT` | Xô xát / giằng co (kinetic + biến thiên khoảng cách) |
-| `PERSON_COLLISION` | 2 người tiếp cận nhanh / va chạm |
-| `VEHICLE_COLLISION` | Va chạm phương tiện (proximity + tình trạng xe: giảm tốc/đổi hướng/nghiêng lật) |
-| `VEHICLE_ACCIDENT` | Xe nghiêng/lật (tai nạn xe đơn — Stage 1: aspect ratio lệch baseline + đổi hướng + đứng yên) |
-| `VEHICLE_OBJECT_COLLISION` | Xe va chạm / bị đè bởi vật thể, người, xe 2 bánh |
-| `OBJECT_FALLING_ON_VEHICLE` | Vật thể rơi từ trên xuống trúng xe (quỹ đạo rơi + chồng lấn bbox) |
-| `VEHICLE_STOP_ANOMALY` | Xe đang chạy đột ngột dừng bất thường |
-| `FIRE_DETECTED` / `SMOKE_DETECTED` | Cháy / khói trong vùng quan sát |
+| `VEHICLE_COLLISION` | Va chạm xe-xe (proximity + tình trạng xe: giảm tốc/đổi hướng/nghiêng lật) |
+| `FIRE_DETECTED` | Cháy trong vùng quan sát (khói là điều kiện hỗ trợ) |
 | `RESTRICTED_INTRUSION` | Xâm nhập khu vực cấm |
