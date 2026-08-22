@@ -1,183 +1,139 @@
 import numpy as np
 from ultralytics import YOLO
-from vehicle_classifier import VehicleTypeClassifier
 import config
+import geometry
 
 
 class YOLODetector:
-    """YOLO detector + ByteTrack (ultralytics) + pose keypoints.
+    """YOLO detector STATELESS — 1 instance dùng chung cho MỌI camera (Rule 1).
 
-    Trả về list track dict: {track_id, cls_id, bbox [x1,y1,x2,y2], conf, pose}.
-    Pose keypoints (17,3) chỉ gắn cho Person (cls 0) khi ENABLE_POSE=True.
-    Track là PHƯƠNG TIỆN (cls_id thuộc VEHICLE_CLASSES) còn được gán thêm
-    "vehicle_type" (tên tiếng Việt tinh: xe máy, xe tải, xe chở dầu...) nếu
-    model phân loại tinh khả dụng.
+    Khác bản cũ:
+      - predict() KHÔNG track/persist (ultralytics `track` giữ tracker nội bộ
+        trong model → không an toàn khi dùng chung model giữa các camera).
+      - Track ID được gán theo CAMERA bởi ObjectMemoryManager (IoU association),
+        hoàn toàn tách khỏi model.
+      - Pose & Vehicle-Cls là Level-3 (specialized): KHÔNG chạy trong detect(),
+        pipeline gọi riêng khi có candidate phù hợp (Rule 4).
     """
 
-    def __init__(self, device=None):
+    def __init__(self, device: str | None = None):
         self.device = device or config.DEVICE
         self.det_model = YOLO(config.DET_MODEL_PATH)
         self.pose_model = YOLO(config.POSE_MODEL_PATH) if config.ENABLE_POSE else None
-        self.vehicle_cls = VehicleTypeClassifier()
         self.classes = config.DETECT_CLASSES
         self.conf = config.CONF_THRESH
         # ultralytics imgsz nhận (height, width)
         self.imgsz = (config.MODEL_INPUT_SIZE[1], config.MODEL_INPUT_SIZE[0])
 
-    def detect(self, frame_bgr):
-        """Chạy detector + tracker trên frame -> danh sách track."""
-        results = self.det_model.track(
+    def predict(self, frame_bgr: np.ndarray) -> list[dict]:
+        """STATELESS detect: trả list detection dict {cls_id, bbox, conf}.
+
+        KHÔNG gán track_id. KHÔNG chạy pose / vehicle-cls (Level 1 chỉ).
+        """
+        results = self.det_model.predict(
             frame_bgr,
-            persist=True,
             imgsz=self.imgsz,
             classes=self.classes,
             conf=self.conf,
-            tracker="bytetrack.yaml",
             verbose=False,
         )
-
-        if not results or results[0].boxes is None or results[0].boxes.id is None:
+        if not results or results[0].boxes is None:
             return []
 
         boxes = results[0].boxes.xyxy.cpu().numpy()
         cls_ids = results[0].boxes.cls.cpu().numpy().astype(int)
         confs = results[0].boxes.conf.cpu().numpy()
-        track_ids = results[0].boxes.id.cpu().numpy().astype(int)
 
-        poses = None
-        if self.pose_model is not None:
-            poses = self._match_pose(frame_bgr, boxes, cls_ids)
-
-        tracks = []
-        for i, t_id in enumerate(track_ids):
-            tracks.append({
-                "track_id": int(t_id),
+        dets: list[dict] = []
+        for i in range(len(boxes)):
+            dets.append({
                 "cls_id": int(cls_ids[i]),
                 "bbox": [float(v) for v in boxes[i]],
                 "conf": float(confs[i]),
-                "pose": None if poses is None else poses[i],
+                "pose": None,
             })
 
-        # Phân biệt RÕ người / xe: bỏ track NGƯỜI nằm gần như trọn trong bbox
-        # xe (tài xế/hành khách trong cabin) để không nhầm lẫn với người đi bộ.
-        tracks = self._remove_persons_inside_vehicles(tracks)
-        tracks = self._remove_vehicles_inside_persons(tracks)
+        # Loại bỏ nhiễu tin cậy thấp theo cặp người/xe trong tracking (giữ logic cũ)
+        dets = self._remove_persons_inside_vehicles(dets)
+        dets = self._remove_vehicles_inside_persons(dets)
+        return dets
 
-        # Phân loại tinh loại xe (xe máy/xe tải/xe chở dầu...) cho phương tiện.
-        # Truyền track_id để bộ đếm đa số theo thời gian chống che khuất.
-        if self.vehicle_cls.available:
-            for tr in tracks:
-                if tr["cls_id"] not in config.VEHICLE_CLASSES:
-                    continue
-                vtype, vconf = self.vehicle_cls.classify(
-                    frame_bgr, tr["bbox"], track_id=tr["track_id"]
-                )
-                if vtype is not None and vconf >= config.VEHICLE_CLS_MIN_CONF:
-                    tr["vehicle_type"] = vtype
-            self.vehicle_cls.prune_votes([t["track_id"] for t in tracks])
-        return tracks
+    def predict_pose(self, frame_bgr: np.ndarray, dets: list[dict]) -> bool:
+        """Level-3: gắn pose keypoints cho track NGƯỜI đã có (chỉ gọi khi cần).
 
-    def _remove_persons_inside_vehicles(self, tracks):
-        """Bỏ track NGƯỜI (cls 0) nằm >= ngưỡng diện tích trong bbox của xe.
-
-        Người đang ngồi/lái xe bên trong ô tô/xe tải bị detect như person
-        riêng → gây trùng/hiểu nhầm là người đi bộ khi xe lưu thông. Bỏ để
-        phân biệt RÕ người (đi bộ, đứng ngoài đường) với xe.
+        Rule 4: pose là SPECIALIZED model — chỉ chạy khi có candidate người
+        tư thế NGÃ (aspect ngang). Người đứng bình thường KHÔNG chạy pose
+        (tiết kiệm ~100ms video). Trả True nếu đã chạy.
         """
-        vehicles = [t for t in tracks if t["cls_id"] in config.VEHICLE_CLASSES]
-        persons = [t for t in tracks if t["cls_id"] == 0]
-        if not vehicles or not persons:
-            return tracks
+        if self.pose_model is None:
+            return False
+        persons = [d for d in dets if d["cls_id"] == 0]
+        # Gate L3: chỉ có tư thế ngã (aspect>ngưỡng) mới cần pose chi tiết
+        suspects = [
+            p for p in persons
+            if (p["bbox"][2] - p["bbox"][0]) / max(p["bbox"][3] - p["bbox"][1], 1e-5)
+            > config.FALL_ASPECT_RATIO_THRESH * 0.8
+        ]
+        if not suspects:
+            return False
 
-        def area(box):
-            return max(box[2] - box[0], 0) * max(box[3] - box[1], 0)
-
-        def contained_ratio(person_box, vehicle_box):
-            a = max(person_box[0], vehicle_box[0])
-            b = max(person_box[1], vehicle_box[1])
-            c = min(person_box[2], vehicle_box[2])
-            d = min(person_box[3], vehicle_box[3])
-            inter = max(0, c - a) * max(0, d - b)
-            p_area = area(person_box)
-            return inter / max(p_area, 1e-5)
-
-        keep_ids = set(t["track_id"] for t in tracks)
-        for p in persons:
-            for v in vehicles:
-                v_area = area(v["bbox"])
-                p_area = area(p["bbox"])
-                # Người bên trong xe: bị phủ phần lớn + nhỏ hơn hẳn vehicle
-                if (contained_ratio(p["bbox"], v["bbox"]) > config.VEHICLE_CLS_IN_VEHICLE_REMOVE_RATIO
-                        and p_area < v_area * 0.5):
-                    keep_ids.discard(p["track_id"])
-                    break
-        return [t for t in tracks if t["track_id"] in keep_ids]
-
-    @staticmethod
-    def _remove_vehicles_inside_persons(tracks):
-        """Bỏ track XE có bbox gần như trọn bên trong bbox NGƯỜI.
-
-        Phòng trường hợp ngược lại (tín hiệu tracking nhiễu): xe nhỏ bị gộp
-        vào người đang dắt qua → giữ nhãn người cho rõ.
-        """
-        persons = [t for t in tracks if t["cls_id"] == 0]
-        vehicles = [t for t in tracks if t["cls_id"] in config.VEHICLE_CLASSES]
-        if not persons or not vehicles:
-            return tracks
-
-        def area(box):
-            return max(box[2] - box[0], 0) * max(box[3] - box[1], 0)
-
-        def contained_ratio(small_box, big_box):
-            a = max(small_box[0], big_box[0])
-            b = max(small_box[1], big_box[1])
-            c = min(small_box[2], big_box[2])
-            d = min(small_box[3], big_box[3])
-            inter = max(0, c - a) * max(0, d - b)
-            s_area = area(small_box)
-            return inter / max(s_area, 1e-5)
-
-        keep_ids = set(t["track_id"] for t in tracks)
-        for v in vehicles:
-            for p in persons:
-                p_area = area(p["bbox"])
-                v_area = area(v["bbox"])
-                if (contained_ratio(v["bbox"], p["bbox"]) > 0.85
-                        and v_area < p_area * 0.3):
-                    keep_ids.discard(v["track_id"])
-                    break
-        return [t for t in tracks if t["track_id"] in keep_ids]
-
-    def _match_pose(self, frame_bgr, det_boxes, cls_ids):
-        """Chạy pose model và khớp keypoint vào box person của det model qua IoU."""
-        pose_results = self.pose_model(frame_bgr, imgsz=self.imgsz, conf=self.conf, verbose=False)
-        poses = [None] * len(det_boxes)
+        try:
+            pose_results = self.pose_model(
+                frame_bgr, imgsz=self.imgsz, conf=self.conf, verbose=False)
+        except Exception:
+            return False
         if not pose_results or pose_results[0].keypoints is None:
-            return poses
+            return False
         if pose_results[0].boxes is None:
-            return poses
+            return False
 
         kp_all = pose_results[0].keypoints.data.cpu().numpy()
         pb_all = pose_results[0].boxes.xyxy.cpu().numpy()
         if len(pb_all) == 0:
-            return poses
+            return False
 
-        for i, box in enumerate(det_boxes):
-            if cls_ids[i] != 0:
-                continue
-            ious = [self._iou(box, b) for b in pb_all]
+        for person in suspects:
+            ious = [geometry.iou(person["bbox"], b) for b in pb_all]
             best = int(np.argmax(ious))
             if ious[best] > 0.5:
-                poses[i] = kp_all[best]
-        return poses
+                person["pose"] = kp_all[best]
+        return True
 
-    @staticmethod
-    def _iou(boxA, boxB):
-        xA = max(boxA[0], boxB[0])
-        yA = max(boxA[1], boxB[1])
-        xB = min(boxA[2], boxB[2])
-        yB = min(boxA[3], boxB[3])
-        inter = max(0, xB - xA) * max(0, yB - yA)
-        areaA = (boxA[2] - boxA[0]) * (boxA[3] - boxA[1])
-        areaB = (boxB[2] - boxB[0]) * (boxB[3] - boxB[1])
-        return inter / float(areaA + areaB - inter + 1e-5)
+    def _remove_persons_inside_vehicles(self, dets: list[dict]) -> list[dict]:
+        """Bỏ detection NGƯỜI nằm >= ngưỡng diện tích trong bbox xe."""
+        vehicles = [d for d in dets if d["cls_id"] in config.VEHICLE_CLASSES]
+        persons = [d for d in dets if d["cls_id"] == 0]
+        if not vehicles or not persons:
+            return dets
+
+        keep = []
+        for p in persons:
+            drop = False
+            for v in vehicles:
+                if (geometry.containment_ratio(p["bbox"], v["bbox"])
+                        > config.VEHICLE_CLS_IN_VEHICLE_REMOVE_RATIO
+                        and geometry.box_area(p["bbox"]) < geometry.box_area(v["bbox"]) * 0.5):
+                    drop = True
+                    break
+            if not drop:
+                keep.append(p)
+        return [d for d in dets if d["cls_id"] != 0] + keep
+
+    def _remove_vehicles_inside_persons(self, dets: list[dict]) -> list[dict]:
+        """Bỏ detection XE có bbox gần như trọn bên trong bbox NGƯỜI."""
+        persons = [d for d in dets if d["cls_id"] == 0]
+        vehicles = [d for d in dets if d["cls_id"] in config.VEHICLE_CLASSES]
+        if not persons or not vehicles:
+            return dets
+
+        keep = []
+        for v in vehicles:
+            drop = False
+            for p in persons:
+                if (geometry.containment_ratio(v["bbox"], p["bbox"]) > 0.85
+                        and geometry.box_area(v["bbox"]) < geometry.box_area(p["bbox"]) * 0.3):
+                    drop = True
+                    break
+            if not drop:
+                keep.append(v)
+        return [d for d in dets if d["cls_id"] == 0] + keep

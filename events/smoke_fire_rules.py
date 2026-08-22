@@ -1,48 +1,46 @@
 import cv2
 import numpy as np
 import config
+from events.scores import fire_score, smoke_score
 
 
 class SmokeFireRules:
-    """Phát hiện LỬA — tối giản điều kiện, giảm tham số.
+    """Phát hiện LỬA & KHÓI — EMIT SCORED CANDIDATE (Rule 6D/6E).
 
-    Chỉ giữ pipeline cốt lõi:
-      STAGE 1 — tách vùng màu lửa (HSV đa dải) + morphological.
-      STAGE 2 — đủ pixel + đa sắc (hue spread) + NHẤP NHÁY (flicker).
-      STAGE 3 — duy trì đủ số frame (persistence window) -> emit FIRE_DETECTED.
-
-    Loại bỏ khói (chỉ hỗ trợ), grid, small fire, glow, moving fire để giảm
-    số tham số và điểm dễ bị nhiễu.
+    Rule 6D: "màu đỏ/cam/sáng" một mình KHÔNG phải FIRE.
+      FireScore = 0.35*fire_model + 0.20*spatial_consistency
+                 + 0.20*temporal_persistence + 0.15*fire_motion
+                 + 0.10*smoke_corroboration ; >= 0.85 mới CONFIRMED.
+    Rule 6E: "gray blur" KHÔNG phải khói. Khói phải phát triển / lan / biến dạng
+      (spatial expansion) chứ không phải vùng xám tĩnh.
     """
 
     def __init__(self):
-        self.fire_persist_window = {}    # zone -> [0/1, ...]
+        self.fire_persist_window = {}    # zone -> list[0/1]
+        self.smoke_persist_window = {}   # zone -> list[0/1]
         self.prev_fire_mask = {}         # zone -> prev fire mask (flicker)
+        self.prev_smoke_area = {}        # zone -> area khói frame trước (expansion)
         self._frame_count = 0
-        self.alert_cooldown = {}         # key -> frame hết hạn cooldown
-
-    def _alert_ready(self, key):
-        return self.alert_cooldown.get(key, -1) <= self._frame_count
-
-    def _mark_alert(self, key):
-        self.alert_cooldown[key] = (self._frame_count
-                                    + config.SMOKE_FIRE_ALERT_COOLDOWN)
 
     # ================================================================
-    # ORCHESTRATOR
+    # ORCHESTRATOR — Level 2/3: phân tích frame (chạy ở FIRE_FPS cadence)
     # ================================================================
     def analyze_frame(self, frame_bgr, roi_polygons, object_bboxes=None):
-        """Phát hiện lửa cho từng ROI (zone). object_bboxes = bbox NGƯỜI để
-        loại áo quần đỏ/cam (không phải lửa)."""
+        """Trả list CANDIDATE: FIRE_DETECTED / SMOKE_DETECTED (chưa confirm).
+
+        Candidate được phát MỌI frame đủ score -> EventConfirmTracker mới
+        tích luỹ temporal để đưa lên CONFIRMED (Rule 7/14). Việc chống
+        spam alert lặp đã do handler (main) dedup theo key.
+        """
         events = []
         if frame_bgr is None:
             return events
 
         self._frame_count += 1
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
-
-        # STAGE 1: fire mask (kênh MÀU HSV)
         fire_mask = self._detect_fire_mask(hsv)
+        smoke_mask = self._detect_smoke_mask(hsv)
+        smoke_area = cv2.countNonZero(smoke_mask)
 
         for roi in roi_polygons:
             if roi.get("event_type") != config.EVENT_TYPE_SMOKE_FIRE:
@@ -54,55 +52,147 @@ class SmokeFireRules:
             cv2.fillPoly(roi_mask, [poly], 255)
 
             fire_in_roi = cv2.bitwise_and(fire_mask, roi_mask)
+            smoke_in_roi = cv2.bitwise_and(smoke_mask, roi_mask)
 
-            # STAGE 2: đủ pixel + bản chất lửa (đa sắc + nhấp nháy)
+            # ----- FIRE components -----
             fire_pixels = self._count_significant_contours(fire_in_roi)
             hue_spread = self._compute_fire_hue_spread(fire_in_roi, hsv)
             flicker = self._compute_flicker(zone_name, fire_in_roi)
-
-            # Loại áo quần người (đỏ/cam)
             person_overlap = self._fire_inside_objects_ratio(
                 fire_in_roi, object_bboxes)
-            is_object_clothing = (
-                object_bboxes
-                and person_overlap > config.SMOKE_FIRE_MAX_PERSON_OVERLAP)
+            clothing = (object_bboxes
+                        and person_overlap > config.SMOKE_FIRE_MAX_PERSON_OVERLAP)
 
-            is_fire_signal = (
-                fire_pixels > config.SMOKE_FIRE_FIRE_PIXEL_THRESH
-                and hue_spread > config.SMOKE_FIRE_FIRE_HUE_CIRC_VAR_THRESH
-                and flicker > config.SMOKE_FIRE_FLICKER_THRESH
-                and not is_object_clothing
-            )
+            fire_signal = 1.0 if (fire_pixels > config.SMOKE_FIRE_FIRE_PIXEL_THRESH
+                                  and not clothing) else 0.0
 
-            # STAGE 3: persistence window-based
-            window = config.SMOKE_FIRE_FIRE_PERSIST_THRESH + 4
-            hist = self.fire_persist_window.setdefault(zone_name, [])
-            hist.append(1 if is_fire_signal else 0)
-            if len(hist) > window:
-                hist.pop(0)
-            sustained = sum(hist) >= config.SMOKE_FIRE_FIRE_PERSIST_THRESH
+            # smoke corroboration (0..1): khói gần vùng lửa
+            smoke_score_v = self._corroboration_smoke(smoke_in_roi, fire_in_roi)
 
-            if sustained and self._alert_ready(zone_name):
-                self._mark_alert(zone_name)
-                conf = min(0.98, 0.90 + hue_spread * 0.5)
-                ev = {
+            persist_hits, persist_win = self._persist_run(
+                "fire", zone_name, bool(fire_signal))
+
+            comps, fire_sc = fire_score(
+                fire_signal, hue_spread, flicker,
+                persist_hits, persist_win, smoke_score_v)
+
+            if fire_sc >= config.FIRE_CANDIDATE_THRESH:
+                events.append({
                     "event_type": "FIRE_DETECTED",
                     "zone_name": zone_name,
-                    "confidence": conf,
-                    "description": f"Phát hiện đám cháy tại khu vực {zone_name}",
-                }
-                bbox = self._fire_bbox(fire_in_roi, poly)
-                if bbox is not None:
-                    ev["bbox"] = bbox
-                events.append(ev)
+                    "confidence": round(fire_sc, 3),
+                    "score_components": comps,
+                    "description": "Phát hiện đám cháy tại khu vực %s (FireScore %.2f)" % (zone_name, fire_sc),
+                    "bbox": self._fire_bbox(fire_in_roi, poly),
+                })
+
+            # ----- SMOKE components -----
+            smoke_signal = 1.0 if (cv2.countNonZero(smoke_in_roi)
+                                   >= config.SMOKE_FIRE_MIN_CONTOUR_AREA) else 0.0
+            expansion = self._smoke_expansion(zone_name, smoke_in_roi, smoke_area)
+            shape = self._smoke_shape_consistency(smoke_in_roi)
+            s_persist, _ = self._persist_run("smoke", zone_name, bool(smoke_signal))
+
+            s_comps, smoke_sc = smoke_score(
+                smoke_signal, expansion, shape, s_persist, config.SMOKE_CONFIRM_FRAMES)
+
+            # Rule 6E: "gray blur" KHÔNG phải khói. Khói PHẢI lan rộng
+            # (expansion > 0). Vùng xám tĩnh → bỏ qua candidate.
+            smoke_expanding = expansion >= getattr(
+                config, "SMOKE_MIN_EXPANSION", 0.05)
+            if smoke_sc >= config.SMOKE_CANDIDATE_THRESH and smoke_signal \
+                    and smoke_expanding:
+                events.append({
+                    "event_type": config.EVENT_TYPE_SMOKE,
+                    "zone_name": zone_name,
+                    "confidence": round(smoke_sc, 3),
+                    "score_components": s_comps,
+                    "description": "Phát hiện khói tại khu vực %s (SmokeScore %.2f)" % (zone_name, smoke_sc),
+                    "bbox": self._blob_bbox(smoke_in_roi, poly),
+                })
 
         return events
 
     # ----------------------------------------------------------------
-    # Helpers
+    # PERSISTENCE WINDOW helper (dùng riêng cho fire/smoke — temporal)
+    # ----------------------------------------------------------------
+    def _persist_run(self, kind, zone_name, hit):
+        window_kind = self.fire_persist_window if kind == "fire" else self.smoke_persist_window
+        window = window_kind.setdefault(zone_name, [])
+        window.append(1 if hit else 0)
+        cap = (config.SMOKE_FIRE_FIRE_PERSIST_THRESH + 4) if kind == "fire" \
+            else (config.SMOKE_CONFIRM_FRAMES + 4)
+        if len(window) > cap:
+            window.pop(0)
+        return sum(window), len(window)
+
+    def _compute_flicker(self, zone_name, fire_mask_current):
+        prev = self.prev_fire_mask.get(zone_name)
+        self.prev_fire_mask[zone_name] = fire_mask_current.copy()
+        if prev is None or prev.shape != fire_mask_current.shape:
+            return 0.0
+        diff = cv2.bitwise_xor(fire_mask_current, prev)
+        changed = cv2.countNonZero(diff)
+        total = (cv2.countNonZero(fire_mask_current)
+                 + cv2.countNonZero(prev))
+        if total < 20:
+            return 0.0
+        return changed / max(total, 1)
+
+    def _smoke_expansion(self, zone_name, smoke_mask, total_smoke_area):
+        """Spatial expansion: khói PHẢI lan rộng (tăng area) — not static gray blob."""
+        prev = self.prev_smoke_area.get(zone_name)
+        self.prev_smoke_area[zone_name] = cv2.countNonZero(smoke_mask)
+        if prev is None:
+            return 0.0
+        if prev <= 0:
+            return 0.0
+        grow = (cv2.countNonZero(smoke_mask) - prev) / float(prev)
+        return max(0.0, min(1.0, grow * 2.0))
+
+    def _smoke_shape_consistency(self, smoke_mask):
+        """Shape consistency: vùng khói phải có shape blob ổn định, không rải rác nhỏ."""
+        n = cv2.countNonZero(smoke_mask)
+        if n < config.SMOKE_FIRE_MIN_CONTOUR_AREA:
+            return 0.0
+        contours, _ = cv2.findContours(
+            smoke_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return 0.0
+        biggest = max(contours, key=cv2.contourArea)
+        return min(1.0, cv2.contourArea(biggest) / float(max(n, 1)))
+
+    def _corroboration_smoke(self, smoke_mask, fire_mask):
+        """Smoke corroboration: khói nằm sát/trong vùng lửa -> tăng tin cậy lửa."""
+        if cv2.countNonZero(fire_mask) == 0:
+            return 0.0
+        radius = 40
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius, radius))
+        fire_dilated = cv2.dilate(fire_mask, kernel)
+        near = cv2.bitwise_and(smoke_mask, fire_dilated)
+        return min(1.0, cv2.countNonZero(near) / float(max(cv2.countNonZero(smoke_mask), 1)))
+
+    # ----------------------------------------------------------------
+    # HỖ TRỢ KHÓI — Rule 6E: khói ≠ vùng xám tĩnh
+    # Màu xám/low-sat, brightness biến thiên, shape blob. Chỉ là SIGNAL,
+    # confirmation phải qua SmokeScore + persist + expansion.
+    # ----------------------------------------------------------------
+    def _detect_smoke_mask(self, hsv):
+        h = hsv[:, :, 0].astype(np.float32)
+        s = hsv[:, :, 1].astype(np.float32)
+        v = hsv[:, :, 2].astype(np.float32)
+        sat_lo = (s < 70)
+        val_lo = (v >= 80) & (v <= 245)
+        mask = (sat_lo & val_lo).astype(np.uint8) * 255
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        kernel2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
+        return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel2)
+
+    # ----------------------------------------------------------------
+    # FIRE MASK (giữ nguyên logic cũ)
     # ----------------------------------------------------------------
     def _detect_fire_mask(self, hsv):
-        """Fire mask từ DUAL HSV ranges (red wraps around H=0/180)."""
         m1 = cv2.inRange(hsv, np.array([0, 110, 180], dtype=np.uint8),
                          np.array([15, 255, 255], dtype=np.uint8))
         m2 = cv2.inRange(hsv, np.array([15, 90, 180], dtype=np.uint8),
@@ -116,7 +206,6 @@ class SmokeFireRules:
         return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close)
 
     def _count_significant_contours(self, mask):
-        """Đếm pixel của contour có diện tích >= ngưỡng (loại nhiễu nhỏ)."""
         contours, _ = cv2.findContours(
             mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         total = 0
@@ -126,26 +215,7 @@ class SmokeFireRules:
                 total += int(area)
         return total
 
-    def _compute_flicker(self, zone_name, fire_mask_current):
-        """Tỷ lệ pixel lửa thay đổi giữa 2 frame liên tiếp (nhấp nháy)."""
-        prev = self.prev_fire_mask.get(zone_name)
-        self.prev_fire_mask[zone_name] = fire_mask_current.copy()
-        if prev is None or prev.shape != fire_mask_current.shape:
-            return 0.0
-        diff = cv2.bitwise_xor(fire_mask_current, prev)
-        changed = cv2.countNonZero(diff)
-        total = (cv2.countNonZero(fire_mask_current)
-                 + cv2.countNonZero(prev))
-        if total < 20:
-            return 0.0
-        return changed / max(total, 1)
-
     def _compute_fire_hue_spread(self, fire_in_roi, hsv):
-        """Độ phân tán màu (hue circular variance) trong vùng lửa.
-
-        Lửa thật đa sắc (lõi trắng -> vàng -> cam -> đỏ) => variance cao.
-        Vật đỏ đồng nhất (áo, xe, biển) -> variance ~ 0.
-        """
         mask = fire_in_roi > 0
         if np.count_nonzero(mask) < config.SMOKE_FIRE_MIN_CONTOUR_AREA:
             return 0.0
@@ -162,7 +232,6 @@ class SmokeFireRules:
         return max(0.0, 1.0 - r)
 
     def _fire_inside_objects_ratio(self, fire_mask_roi, object_bboxes):
-        """Tỷ lệ pixel "lửa" nằm TRONG bbox người (áo đỏ/cam) -> loại."""
         if not object_bboxes or cv2.countNonZero(fire_mask_roi) == 0:
             return 0.0
         h, w = fire_mask_roi.shape[:2]
@@ -182,7 +251,6 @@ class SmokeFireRules:
 
     @staticmethod
     def _fire_bbox(fire_in_roi, poly=None):
-        """bbox [x1,y1,x2,y2] của vùng lửa; fallback về nguyên ROI."""
         ys, xs = np.where(fire_in_roi > 0)
         if len(xs) == 0:
             if poly is None:
@@ -191,3 +259,7 @@ class SmokeFireRules:
                     int(poly[:, 0].max()), int(poly[:, 1].max())]
         return [int(xs.min()), int(ys.min()),
                 int(xs.max()), int(ys.max())]
+
+    @staticmethod
+    def _blob_bbox(mask, poly=None):
+        return SmokeFireRules._fire_bbox(mask, poly)

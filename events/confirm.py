@@ -2,61 +2,63 @@ import config
 
 
 class EventConfirmTracker:
-    """Event Score / Confirm trước khi bắn Alert chính thức.
+    """Event Score / Confirm trước khi bắn Alert chính thức (Rule 7).
 
-    Cải tiến: mỗi loại event có ngưỡng confirm riêng (per-event-type thresholds),
-    nhưng MỌI event phải xuất hiện ít nhất MIN_CONFIRM_FRAMES (>= 2) detection
-    frame trước khi được xác nhận — tránh cảnh báo chỉ từ 1 frame duy nhất.
-    Smoke/Fire, VEHICLE_COLLISION có persistence riêng bên trong rule; ngưỡng
-    tại đây là lớp confirm chung tối thiểu.
+    Nomenclature thống nhất:
+      _DETECTED   — tín hiệu thô (rule sinh ra, chưa qua candidate). KHÔNG alert.
+      _CANDIDATE  — confidence >= candidate_thresh. KHÔNG hiển thị alert.
+      _CONFIRMED  — duy trì >= frames frames & confidence >= confirm_thresh.
+                    CHỈ CONFIRMED mới: snapshot, lưu DB, gửi notification,
+                    đưa chart, phát cảnh báo.
+
+    MỌI event phải có candidate -> confirmation (Rule 14).
     """
 
-    def __init__(self, default_frames=4):
-        self.default_frames = default_frames
-        self.pending_events = {}  # key -> score_count
+    def __init__(self):
+        self.pending_events = {}  # key -> {"count": int, "score": float}
 
     def process(self, candidate_events, decay=True):
-        """Xử lý candidates.
+        """Xử lý candidate events → trả list CONFIRMED (đã gắn stage).
 
         Args:
-            candidate_events: Danh sách event candidate frame này.
+            candidate_events: Danh sách event CANDIDATE (confidence = score).
             decay: True → giảm counter cho các key không còn xuất hiện.
-                Object-based candidates CHỈ xuất hiện trên detection frame, nên decay
-                phải chạy trên detection frame để counter tích lũy đúng nhịp 1:1.
-                Trên predicted frame (decay=False) chỉ cộng dồn, không trừ.
         """
         confirmed_events = []
         current_keys = set()
 
         for ev in candidate_events:
-            key = (ev["event_type"],
+            event_type = ev["event_type"]
+            meta = config.rule_meta(event_type)
+            key = (event_type,
                    tuple(ev.get("track_ids", [])),
                    ev.get("zone_name"))
+            score = ev.get("confidence", 0.0)
             current_keys.add(key)
 
-            # Lấy ngưỡng confirm riêng cho loại event này, nhưng KHÔNG thấp
-            # hơn MIN_CONFIRM_FRAMES (2) — mọi hiện tượng cần >= 2 frame.
-            required = max(
-                config.MIN_CONFIRM_FRAMES,
-                config.EVENT_CONFIRM_MAP.get(ev["event_type"], self.default_frames),
-            )
+            # 1. Candidate gate: score >= candidate_thresh mới bắt đầu đếm
+            if score < meta["candidate"]:
+                continue
 
-            # Cap counter tại required + 2 để khi tín hiệu hết,
-            # alert được thu hồi NHANH (chỉ cần decay 2 frame)
-            self.pending_events[key] = min(
-                required + 2,
-                self.pending_events.get(key, 0) + 1,
-            )
+            state = self.pending_events.setdefault(
+                key, {"count": 0, "score": 0.0})
+            state["count"] = min(meta["frames"] + 2, state["count"] + 1)
+            state["score"] = max(state["score"], score)
 
-            if self.pending_events[key] >= required:
-                confirmed_events.append(ev)
+            # 2. Confirmed: đủ frames + score >= confirm_thresh
+            if (state["count"] >= meta["frames"]
+                    and score >= meta["confirm"]):
+                confirmed = dict(ev)
+                confirmed["stage"] = config.STAGE_CONFIRMED
+                confirmed["confidence"] = round(min(1.0, score), 3)
+                confirmed_events.append(confirmed)
 
-        # Decay / Clean events không còn xuất hiện (chỉ trên detection frame)
+        # Decay các key không còn xuất hiện (trên detection frame)
         if decay:
             for key in list(self.pending_events.keys()):
                 if key not in current_keys:
-                    self.pending_events[key] -= 1
-                    if self.pending_events[key] <= 0:
+                    self.pending_events[key]["count"] -= 1
+                    if self.pending_events[key]["count"] <= 0:
                         del self.pending_events[key]
 
         return confirmed_events

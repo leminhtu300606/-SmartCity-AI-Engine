@@ -5,6 +5,134 @@ MODEL_INPUT_SIZE = (640, 384)
 DETECTION_INTERVAL = 3
 TEMPORAL_BUFFER_MAXLEN = 45          # Tăng để phân tích temporal tốt hơn (was 30)
 
+# ============================================================
+# AI PERFORMANCE CONTRACT (Task)
+# Rule 1: 1 model = 1 instance/process — SHARED, không load theo camera.
+# Rule 2: Camera chỉ capture + giữ latest frame; KHÔNG tự chạy inference.
+# Rule 3: Camera FPS != AI inference FPS (detect 5 FPS, fire 1-2 FPS, accident 1-2 FPS).
+# Rule 4: Cascade — không chạy mọi model trên mọi frame.
+# Rule 7: CANDIDATE != EVENT (nomenclature _DETECTED/_CANDIDATE/_CONFIRMED).
+# Rule 9: Embedding async, không chặn detection loop.
+# Rule 11: Giới hạn PyTorch/OpenMP threads để không chiếm toàn bộ CPU.
+# ============================================================
+
+# --- Rule 11: CPU threads limits ---
+CPU_LOGICAL_THREADS = 12
+AI_MAX_THREADS = 4                # PyTorch/OpenMP dùng tối đa N thread (không chiếm 12)
+AI_MAX_INTEROP_THREADS = 1
+AI_WORKER_POOL_SIZE = 2           # AI Worker pool dùng chung cho mọi camera
+
+# --- Rule 3: Time-based inference FPS ---
+AI_DETECT_FPS = 5.0               # Object detection <= 5 FPS/camera
+AI_FIRE_FPS = 1.5                 # Fire/Smoke 1-2 FPS
+AI_ACCIDENT_FPS = 1.5             # Accident - tai nạn xe 1-2 FPS
+
+# --- Rule 2/4: latest-frame queue ---
+# Camera capture chỉ giữ 1 frame mới nhất; scheduler lấy frame mới -> bỏ frame cũ.
+# Job per camera tối đa 1 đang chạy (KHÔNG queue vô hạn).
+
+# --- Rule 12: RAM budget per camera ---
+PER_CAMERA_RAM_TARGET_MB = 400
+PER_CAMERA_RAM_HARD_MB = 500
+# Shared model memory KHÔNG tính lặp lại cho từng camera.
+
+# --- Rule 13: Chỉ số "đã tối ưu" — mục tiêu theo số camera ---
+# CPU avg (tỷ lệ trên toàn máy): 1 cam <=25%, 2 cam <=45%, 4 cam <=80%.
+BENCH_CPU_TARGET = {1: 0.25, 2: 0.45, 4: 0.80, 8: None}
+# RAM toàn process (GB) — model shared đã được trải đều: 1/2/4 cam.
+BENCH_RAM_TARGET_GB = {1: 1.4, 2: 1.7, 4: 2.3, 8: None}
+# Detection FPS tối thiểu/camera (không được dưới 5).
+BENCH_DETECT_FPS_MIN = 5.0
+# Frame drop (cadence-miss) tối đa: 1/2 cam <5%, 4 cam <10%, 8 cam <15%.
+BENCH_FRAME_DROP_MAX = {1: 0.05, 2: 0.05, 4: 0.10, 8: 0.15}
+
+# Debug: in CANDIDATE mỗi detection pass (mặc định tắt).
+AI_DEBUG_CANDIDATES = False
+
+# --- Rule 6C: Vehicle confidence gate trước khi vào collision pipeline ---
+VEHICLE_COLLISION_MIN_CONF = 0.65  # conf vehicle >= 0.60-0.70 mới được vào collision
+
+# --- Rule 7: Event nomenclature ---
+STAGE_CANDIDATE = "CANDIDATE"
+STAGE_CONFIRMED = "CONFIRMED"
+
+EVENT_TYPE_SMOKE = "SMOKE_DETECTED"
+
+# ============================================================
+# SCORE FORMULA WEIGHTS + THRESHOLDS — Rule 6
+# Mọi sự kiện phải đi qua candidate -> confirmation.
+# ============================================================
+
+# ---- A. FALL: FallScore = 0.25*posture + 0.25*vertical_motion
+#                 + 0.20*bbox_aspect_change + 0.15*center_velocity
+#                 + 0.15*temporal_score ; >= 0.80 & >= 3/5 frames => FALL_CONFIRMED
+FALL_W_POSTURE = 0.25
+FALL_W_VERTICAL_MOTION = 0.25
+FALL_W_ASPECT_CHANGE = 0.20
+FALL_W_CENTER_VELOCITY = 0.15
+FALL_W_TEMPORAL = 0.15
+FALL_CANDIDATE_THRESH = 0.50
+FALL_CONFIRM_THRESH = 0.80
+FALL_CONFIRM_FRAMES = 3            # >= 3 frames
+
+# ---- B. FIGHT: FightScore = 0.20*person_pair + 0.20*contact
+#                 + 0.25*relative_motion + 0.20*motion_intensity
+#                 + 0.15*temporal_score
+FIGHT_W_PERSON_PAIR = 0.20
+FIGHT_W_CONTACT = 0.20
+FIGHT_W_RELATIVE_MOTION = 0.25
+FIGHT_W_MOTION_INTENSITY = 0.20
+FIGHT_W_TEMPORAL = 0.15
+FIGHT_CANDIDATE_THRESH = 0.50
+FIGHT_CONFIRM_THRESH = 0.70
+FIGHT_CONFIRM_FRAMES = 3
+
+# ---- C. COLLISION: CollisionScore = 0.15*track_stability
+#                 + 0.20*relative_velocity + 0.20*distance_closing
+#                 + 0.20*collision_geometry + 0.15*velocity_change
+#                 + 0.10*temporal_score
+COLLISION_W_TRACK_STABILITY = 0.15
+COLLISION_W_RELATIVE_VELOCITY = 0.20
+COLLISION_W_DISTANCE_CLOSING = 0.20
+COLLISION_W_GEOMETRY = 0.20
+COLLISION_W_VELOCITY_CHANGE = 0.15
+COLLISION_W_TEMPORAL = 0.10
+COLLISION_CANDIDATE_THRESH = 0.50
+COLLISION_CONFIRM_THRESH = 0.75
+COLLISION_CONFIRM_FRAMES = 3
+
+# ---- D. FIRE: FireScore = 0.35*fire_model + 0.20*spatial_consistency
+#                 + 0.20*temporal_persistence + 0.15*fire_motion
+#                 + 0.10*smoke_corroboration ; >= 0.85 => FIRE_CONFIRMED
+FIRE_W_MODEL = 0.35
+FIRE_W_SPATIAL = 0.20
+FIRE_W_TEMPORAL = 0.20
+FIRE_W_MOTION = 0.15
+FIRE_W_SMOKE = 0.10
+FIRE_CANDIDATE_THRESH = 0.55
+FIRE_CONFIRM_THRESH = 0.85
+FIRE_CONFIRM_FRAMES = 6
+
+# ---- E. SMOKE: SmokeScore + persistence + spatial_expansion + shape
+SMOKE_W_MODEL = 0.35
+SMOKE_W_TEMPORAL = 0.25
+SMOKE_W_EXPANSION = 0.20
+SMOKE_W_SHAPE = 0.20
+SMOKE_CANDIDATE_THRESH = 0.50
+SMOKE_CONFIRM_THRESH = 0.75
+SMOKE_CONFIRM_FRAMES = 8
+SMOKE_MIN_EXPANSION = 0.05      # Rule 6E: khói phải LAN RỘNG mới là khói thật
+
+# ---- Tracking association (YOLO shared => ID phải gán theo camera) ----
+TRACK_ASSOC_IOU = 0.20            # IoU tối thiểu để khớp detection vào track cũ
+
+# ---- Embedding async (Rule 9) ----
+EMBEDDING_ENABLED = True
+EMBED_QUEUE_MAXSIZE = 32          # queue crop giới hạn (không vô hạn)
+EMBEDDING_MODEL_PATH = ""         # Có thể tự tải: torchvision mobilenet_v3_large weights
+EMBEDDING_FAISS_INDEX = ""        # Path index FAISS (.index). Rỗng -> dùng index in-memory
+EMBEDDING_FEATURE_DIM = 512       # DIM vector embedding ghi vào index (MobileNetV3 cho 1024)
+
 # Model / Inference
 DEVICE = "cpu"                       # "cpu" hoặc "0" (GPU)
 DET_MODEL_PATH = "weights/yolo11n.pt"
@@ -82,7 +210,6 @@ DETECT_CLASSES = [0, 1, 2, 3, 5, 6, 7]  # person + phương tiện giao thông (
 VEHICLE_CLASSES = [1, 2, 3, 5, 6, 7]    # bicycle, car, motorbike, bus, train, truck
 CONF_THRESH = 0.30                   # Giảm nhẹ để recall tốt hơn (was 0.35)
 ENABLE_POSE = True
-MIN_ALERT_CONFIDENCE = 0.9           # Chỉ đưa alert (log/vẽ/snapshot) có confidence >= ngưỡng này
 
 # Event Type Constants
 # ============================================================
@@ -161,6 +288,54 @@ for _zones in CAMERA_ROIS.values():
         _z["polygon"] = _resolve_polygon(_z["polygon"])
 
 # ============================================================
+# EVENT RULE META (candidate / confirm scoring) — Rule 6 & 7
+# MỌI event: confidence >= candidate => candidate (chưa alert)
+#            duy trì >= frames & score >= confirm => CONFIRMED (alert + snapshot)
+# ============================================================
+EVENT_RULE_META = {
+    "HUMAN_FALL": {
+        "candidate": FALL_CANDIDATE_THRESH,
+        "confirm": FALL_CONFIRM_THRESH,
+        "frames": FALL_CONFIRM_FRAMES,
+    },
+    "HUMAN_CONFLICT": {
+        "candidate": FIGHT_CANDIDATE_THRESH,
+        "confirm": FIGHT_CONFIRM_THRESH,
+        "frames": FIGHT_CONFIRM_FRAMES,
+    },
+    "VEHICLE_COLLISION": {
+        "candidate": COLLISION_CANDIDATE_THRESH,
+        "confirm": COLLISION_CONFIRM_THRESH,
+        "frames": COLLISION_CONFIRM_FRAMES,
+    },
+    "FIRE_DETECTED": {
+        "candidate": FIRE_CANDIDATE_THRESH,
+        "confirm": FIRE_CONFIRM_THRESH,
+        "frames": FIRE_CONFIRM_FRAMES,
+    },
+    "SMOKE_DETECTED": {
+        "candidate": SMOKE_CANDIDATE_THRESH,
+        "confirm": SMOKE_CONFIRM_THRESH,
+        "frames": SMOKE_CONFIRM_FRAMES,
+    },
+    "RESTRICTED_INTRUSION": {
+        "candidate": 0.60,
+        "confirm": 0.80,
+        "frames": 3,
+    },
+}
+
+
+def rule_meta(event_type, default_candidate=0.0, default_confirm=0.0, default_frames=2):
+    m = EVENT_RULE_META.get(event_type, {})
+    return {
+        "candidate": m.get("candidate", default_candidate),
+        "confirm": m.get("confirm", default_confirm),
+        "frames": int(m.get("frames", default_frames)),
+    }
+
+
+# ============================================================
 # GRID ZONES — Chia frame thành LƯỚI VÙNG cho xô xát / va chạm người
 # Chỉ xét xô xát giữa những người CÙNG ô lưới (dựa trên tâm bbox người).
 # 2 người ở 2 ô khác nhau = 2 khu vực khác nhau trong frame → không xét
@@ -186,34 +361,10 @@ def grid_zone(cx, cy, frame_w=None, frame_h=None):
     return row * GRID_COLS + col
 
 
-def grid_adjacent(cx1, cy1, cx2, cy2, frame_w=None, frame_h=None):
-    """2 điểm ở CÙNG ô hoặc 2 ô KỀ NHAU (8 hướng) — bắt đánh xa qua biên ô."""
-    r1, c1 = grid_row_col(cx1, cy1, frame_w, frame_h)
-    r2, c2 = grid_row_col(cx2, cy2, frame_w, frame_h)
-    return max(abs(r1 - r2), abs(c1 - c2)) <= 1
-
-# ============================================================
-# EVENT CONFIRMATION — Per-Event-Type
-# Mỗi loại event cần số frame xác nhận khác nhau.
-# MIN_CONFIRM_FRAMES = ngưỡng tối thiểu: MỌI hiện tượng phải xuất hiện
-# ít nhất 2 detection frame trước khi bắn alert (tránh cảnh báo 1 frame).
-# Smoke/Fire, VEHICLE_COLLISION có persistence riêng bên trong rule, nhưng
-# confirm tracker vẫn giữ tối thiểu 2 frame cho thống nhất.
-# ============================================================
-MIN_CONFIRM_FRAMES = 2                # Ngưỡng tối thiểu cho MỌI event (>= 2 frame)
-EVENT_CONFIRM_FRAMES_DEFAULT = 4
-EVENT_CONFIRM_MAP = {
-    "HUMAN_FALL": 5,
-    "HUMAN_CONFLICT": 3,             # was 4 — xô xát có thể ngắn; hạ để không bỏ lọt
-    "VEHICLE_COLLISION": 2,          # Rule collision đã tự sustained (VEHICLE_COLLISION_SUSTAINED=4); confirm 2 = tổng >= 2 frame
-    "FIRE_DETECTED": 2,              # Smoke/fire dùng persistence riêng bên trong (>= 8 frame)
-}
-
 # ============================================================
 # FALL DETECTION — tối giản: chỉ dựa tư thế nằm ngang + persistence
 # ============================================================
 FALL_ASPECT_RATIO_THRESH = 1.2       # Width/Height > threshold = tư thế nằm ngang
-FALL_PERSIST_FRAMES = 4              # Phải nằm ngang >= N detection frames mới xác nhận
 
 # ============================================================
 # CONFLICT / FIGHT DETECTION — tối giản
@@ -257,11 +408,6 @@ INTRUSION_DEPTH_RATIO = 0.15         # Phải vào sâu >= 15% chiều cao ngư�
 SMOKE_FIRE_MIN_CONTOUR_AREA = 250    # Diện tích contour tối thiểu (px²)
 SMOKE_FIRE_FIRE_PIXEL_THRESH = 250   # Pixel lửa tối thiểu
 SMOKE_FIRE_FIRE_PERSIST_THRESH = 6   # Persistence frames cho lửa (cửa sổ xác nhận)
-SMOKE_FIRE_FLICKER_THRESH = 0.07     # Tỷ lệ thay đổi frame-to-frame cho flicker
-SMOKE_FIRE_FIRE_HUE_CIRC_VAR_THRESH = 0.025  # Circular variance hue tối thiểu (lửa 0.03+, vật đỏ đồng màu ≈ 0)
 # LOẠI BỎ VẬT THỂ MÀU LỬA: nếu vùng "lửa" nằm chủ yếu BÊN TRONG bbox người
 # (đã detect bởi YOLO), đó là áo quần màu đỏ/cam chứ không phải lửa → loại.
 SMOKE_FIRE_MAX_PERSON_OVERLAP = 0.60       # > 60% pixel "lửa" nằm trong bbox người → loại
-
-# COOLDOWN: sau khi báo 1 event cho 1 zone, KHÔNG báo lại zone đó trong N frame.
-SMOKE_FIRE_ALERT_COOLDOWN = 120

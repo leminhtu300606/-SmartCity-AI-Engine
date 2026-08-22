@@ -1,148 +1,144 @@
 # SmartCity Prototype - AI Vision Engine
 
-Hệ thống giám sát thông minh đô thị: nhận diện sự kiện từ **nhiều camera HLS** trong thời gian thực, hiển thị cảnh báo trực tiếp lên video.
+Hệ thống giám sát thông minh đô thị: nhận diện sự kiện từ **nhiều camera** trong thời gian thực, hiển thị cảnh báo trực tiếp lên video và web dashboard.
+
+Thiết kế tuân theo **AI PERFORMANCE CONTRACT** (Rule 1–15): 1 model dùng chung, camera chỉ capture, cascade + candidate → confirmation, ngân sách CPU/RAM per-camera có mục tiêu đo được.
 
 ## Tính năng
 
-- **4 logic phát hiện sự kiện (Rule-based + Temporal Confirm) — Phase 1:**
-  - Person fall / conflict — người ngã (`HUMAN_FALL`), xô xát (`HUMAN_CONFLICT`)
-  - Vehicle collision — va chạm xe-xe (`VEHICLE_COLLISION`)
-  - Smoke / Fire — cháy (`FIRE_DETECTED`): phân tích màu HSV + tương phản sáng trên nền tối + tần số nhấp nháy lửa + khói là điều kiện hỗ trợ
-  - Restricted-zone intrusion — xâm nhập vùng cấm (`RESTRICTED_INTRUSION`) bằng điểm trong polygon + thời gian lưu lại (dwell)
-- **Detector YOLO11n + ByteTrack + Pose keypoints** (17 điểm) để phân tích hành vi.
-- **Tracking dự đoán (constant velocity)** giữa các frame detect nhằm giảm tải CPU; chỉ detection thật mới ghi lịch sử kinematics để tránh cảnh báo sai thời điểm.
-- **Dashboard Web** (Flask): hiển thị danh sách cảnh báo kèm **ảnh snapshot** chụp lại đúng lý do gây cảnh báo, lọc theo event type, tự refresh 2s.
-- Chạy **1 nguồn mỗi lần** (single camera hoặc video local).
-- Hiển thị ROI, bounding box, HUD đếm object và banner cảnh báo trên video.
+- **4 nhóm logic phát hiện sự kiện (Rule-based scoring + Temporal Confirm):**
+  - Người ngã (`HUMAN_FALL`), xô xát/đánh nhau (`HUMAN_CONFLICT`)
+  - Va chạm xe-xe (`VEHICLE_COLLISION`) — có gate confidence xe ≥ 0.65 + tín hiệu động học
+  - Cháy (`FIRE_DETECTED`) — FireScore hợp nhất: model + spatial + temporal + motion + smoke
+  - Khói (`SMOKE_DETECTED`) — SmokeScore: khói phải **lan rộng** (expansion) mới là khói
+  - Xâm nhập vùng cấm (`RESTRICTED_INTRUSION`) — depth + movement + dwell
+- **Shared models (Rule 1/2):** YOLO detect + pose + YOLO-cls xe dùng chung 1 instance/process cho MỌI camera — không load theo camera.
+- **Camera chỉ capture (Rule 2/3):** giữ 1 frame mới nhất; AI chạy theo cadence (5 FPS detect, 1.5 FPS fire/accident), không theo camera FPS.
+- **Cascade (Rule 4) + CANDIDATE ≠ EVENT (Rule 7/8):** specialized model chỉ chạy khi có candidate; snapshot/DB/notification CHỈ sau `CONFIRMED`.
+- **Embedding async (Rule 9):** MobileNetV3 → FAISS chạy off critical path, không chặn detection.
+- **Giới hạn CPU threads (Rule 11):** PyTorch/OpenMP/MKL bị giới hạn (mặc định 4 thread).
+- **Dashboard Web (Flask):** alert + snapshot full frame & crop, lọc theo event, tự refresh.
+- **Bộ test false-positive (Rule 15):** `python -m unittest discover -s tests -t .`
 
 ## Cấu trúc dự án
 
 ```
 smartcity_prototype/
-├── config.py               # Cấu hình stream, model, ROI, ngưỡng sự kiện
-├── main.py                 # Pipeline chính (CameraWorker, vòng lặp xử lý)
-├── detector.py             # YOLO detect + ByteTrack + pose├── tracker/                # Quản lý bộ nhớ object (memory_manager, object_state)
-├── events/                 # Các rule phát hiện + confirm + visualizer
-│   ├── person_rules.py
-│   ├── vehicle_rules.py
-│   ├── smoke_fire_rules.py
-│   ├── intrusion_rules.py
-│   ├── confirm.py
-│   ├── classifier.py
-│   └── visualizer.py
+├── config.py               # Cấu hình stream, model, ROI, ngưỡng score (Rule 6)
+├── main.py                 # Capture workers + AI Worker Pool + dashboard + summary
+├── detector.py             # YOLO detect + pose (STATELESS — shared)
+├── vehicle_classifier.py   # YOLO-cls phân loại tinh loại xe (shared, vote theo track)
+├── inference/
+│   ├── registry.py         # SharedModelRegistry: 1 model = 1 instance (Rule 1)
+│   ├── scheduler.py        # InferenceScheduler: cadence detect/fire/accident (Rule 3)
+│   ├── context.py          # CameraContext: latest frame slot + state per-camera
+│   └── embedding.py        # MobileNetV3 → FAISS async (Rule 9)
+├── tracker/                # Quản lý bộ nhớ object + gán track_id per-camera
+├── events/                 # Rule-filters: candidate → confirm → visualizer
+│   ├── scores.py           # Fall/Fight/Collision/Fire/Smoke score (Rule 6)
+│   ├── classifier.py       # Cascade Level 2+4
+│   ├── confirm.py          # EventConfirmTracker (Rule 7)
+│   └── ...
 ├── dashboard/              # Web dashboard: alert + snapshot (store, server)
-└── weights/                # Model: yolo11n.pt, yolo11n-pose.pt
+├── tests/                  # Rule 15: false-positive tests cho từng event
+└── weights/                # yolo11n.pt, yolo11n-pose.pt
 ```
 
 ## Cài đặt
 
-### 1. Python & venv
-
 Cần Python **3.10+** (khuyến nghị 3.11–3.14).
 
 ```bash
-# Windows
 python -m venv venv
-venv\Scripts\activate
-
-# Linux/macOS
-python3 -m venv venv
-source venv/bin/activate
-```
-
-### 2. Cài dependencies
-
-```bash
+venv\Scripts\activate          # Windows
 pip install -r requirements.txt
 ```
 
-> **Lưu ý torch CPU:** `requirements.txt` cài torch (bản mặc định, có thể kèm CUDA). Nếu máy không có GPU, cài torch CPU cho nhẹ và nhanh:
->
+> **torch CPU:** nếu máy không có GPU, cài torch CPU cho nhẹ:
 > ```bash
 > pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 > pip install -r requirements.txt
 > ```
 
-### 3. Tải model
-
-Đặt 2 file weight vào thư mục `weights/`:
-
-- `yolo11n.pt` — detect
-- `yolo11n-pose.pt` — pose keypoints
-
+Đặt 2 file weight vào `weights/`:
 ```bash
-# Tải nhanh bằng ultralytics (sau khi cài dependencies)
 python -c "from ultralytics import YOLO; YOLO('yolo11n.pt'); YOLO('yolo11n-pose.pt')"
-# Sau đó copy 2 file vào thư mục weights/
 ```
+`weights/vehicle_cls.pt` (phân loại xe tinh) là **tuỳ chọn** — thiếu thì pipeline tự vô hiệu hoá. `EMBEDDING_MODEL_PATH` (MobileNetV3) cũng tuỳ chọn — thiếu thì tự tải `MobileNet_V3_Large_Weights.DEFAULT`.
 
 ## Chạy
 
-Chạy **riêng từng camera/video** (mỗi lần 1 nguồn), hiển thị trực tiếp trên cửa sổ OpenCV:
-
 ```bash
-# Chạy stream HLS của 1 camera
+# 1 camera với GUI video
 python main.py cam09
 
-# Chạy camera khác
-python main.py cam10
+# Chạy TẤT CẢ camera song song (headless — OpenCV HighGUI không thread-safe)
+python main.py --all-cameras
 
-# Phân tích 1 video local (vẫn áp dụng ROI/rule của cam09)
-python main.py cam09 --video path/to/video.mp4
-
-# Chạy HEADLESS: không cửa sổ video, chỉ log cảnh báo + chụp ảnh vị trí cảnh báo
+# Headless: log + snapshot không cửa sổ video
 python main.py cam09 --headless
 
-# Xem danh sách camera / hướng dẫn
+# Để log stdout hiện ngay khi redirect/benchmark:
+python -u main.py cam09 --headless
+
+# Danh sách camera
 python main.py
 ```
 
-- Mỗi lần chạy chỉ xử lý **1 nguồn** duy nhất. GUI mode hiển thị ROI, bounding box, HUD đếm object và banner cảnh báo trực tiếp trên video.
-- **Headless mode (`--headless`)**: không mở cửa sổ video, chỉ in cảnh báo ra console + ghi `snapshots/alerts.log`, đồng thời **tự chụp ảnh vị trí cảnh báo** (snapshot toàn frame + ảnh `_crop` cắt đúng vùng bbox).
-- Nhấn `q` để thoát, `Ctrl+C` để dừng. Với video local, pipeline tự dừng khi hết video.
+- Khi thoát (hoặc `Ctrl+C`), pipeline in **AI PERFORMANCE SUMMARY**: shared models, AI detect FPS/camera, drop rate (cadence-miss), RSS MB/camera so với target, và **so sánh với Rule 13** (CPU avg / RAM / detect FPS / frame-drop theo số camera, đánh dấu `OK`/`WARN`).
+- Nhấn `q` để thoát GUI. Với video local, worker tự dừng khi hết video.
 
-### Dashboard cảnh báo
+## AI PERFORMANCE CONTRACT — cách kiến trúc đáp ứng
 
-Khi chạy, pipeline tự bật **web dashboard** tại `http://localhost:8080`:
-
-- **Danh sách cảnh báo**: mỗi alert gồm event type, mô tả, camera, thời gian, độ tin cậy.
-- **Ảnh snapshot**: mỗi lần có cảnh báo mới, hệ thống tự chụp lại frame (đã vẽ bounding box / vùng nghi vấn) và lưu vào `snapshots/` — dùng làm **bằng chứng lý do cảnh báo**.
-- Lọc theo từng loại event (người ngã, xô xát, xe va chạm, lửa/khói...), tự refresh mỗi 2 giây.
-- **Chỉ đưa cảnh báo có `confidence >= MIN_ALERT_CONFIDENCE` (mặc định 0.9)** — loại bỏ alert có độ tin cậy thấp.
-
-Tắt/bật trong `config.py`:
-
-| Tham số | Giá trị mặc định | Ý nghĩa |
+| Rule | Yêu cầu | Hiện thực |
 |---|---|---|
-| `DASHBOARD_ENABLED` | True | Bật/tắt dashboard |
-| `DASHBOARD_HOST` / `DASHBOARD_PORT` | `0.0.0.0` / `8080` | Địa chỉ truy cập dashboard |
-| `SNAPSHOT_DIR` | `snapshots/` | Thư mục lưu ảnh snapshot |
-| `SNAPSHOT_CROP_MARGIN` | `0.4` | Mở rộng vùng cắt ảnh `_crop` quanh bbox cảnh báo |
-| `ALERT_LOG_FILE` | `alerts.log` | File log cảnh báo (mỗi alert 1 dòng kèm vị trí bbox) |
-| `HEADLESS` | `False` | Chạy không cửa sổ video (có thể bật qua `--headless`) |
-| `MIN_ALERT_CONFIDENCE` | `0.9` | Ngưỡng confidence tối thiểu để đưa alert |
+| 1 | Model KHÔNG load theo camera | `inference/registry.py` singleton + lock serial hoá predict |
+| 2 | Camera chỉ capture + latest frame | `CameraContext.push_frame` ghi đè 1 frame; `main.CaptureWorker` không inference |
+| 3 | Camera FPS ≠ AI FPS | `AI_DETECT_FPS=5`, `AI_FIRE_FPS=1.5`, `AI_ACCIDENT_FPS=1.5`; tick fire/accident giữa 2 tick detect KHÔNG chạy lại YOLO (detect giữ đúng ≤ 5 FPS) |
+| 4 | Cascade | fire/accident chạy ở cadence riêng; object rules chỉ chạy khi có detection mới; pose chạy khi có người aspect ngang; vehicle-cls chỉ khi có track xe |
+| 6 | Score formula từng hành vi | `events/scores.py` (weights trong config) |
+| 7 | CANDIDATE ≠ EVENT | `events/confirm.py` + `STAGE_CANDIDATE/CONFIRMED` |
+| 8 | Snapshot sau CONFIRMED | `dashboard/store.py:record` chặn stage < CONFIRMED |
+| 9 | Embedding async | `inference/embedding.py` worker riêng, queue giới hạn |
+| 11 | Giới hạn CPU threads | `registry.limit_cpu_threads()` (trước khi load model) |
+| 14 | Mọi event có candidate → confirmation | `classifier.evaluate` → `confirmer.process` |
+| 15 | Test false-positive mỗi event | `tests/` (chạy bằng unittest) |
 
-> Cần cài `flask` (đã thêm vào `requirements.txt`).
+Ngân sách RAM (Rule 12): model shared KHÔNG tính lặp lại cho từng camera; per-camera thêm ≤ 300–400 MB (hard ≤ 500 MB) — đo ở summary (`RSS / N camera`).
+
+## Dashboard
+
+Tự bật tại `http://localhost:8080` (poll `/api/alerts`). Mỗi alert gồm event type, mô tả, camera, thời gian, confidence kèm **snapshot full frame + crop** làm bằng chứng. Chỉ alert `CONFIRMED` mới vào dashboard (threshold thật do confirm threshold của từng event).
 
 ## Cấu hình chính (`config.py`)
 
-| Tham số | Giá trị mặc định | Ý nghĩa |
-|---|---|---|
-| `CAMERA_STREAMS` | cam09, cam10 | URL HLS/RTSP các camera |
-| `DETECTION_INTERVAL` | 3 | Chạy detector mỗi N frame, frame giữa dùng tracking dự đoán |
-| `EVENT_CONFIRM_FRAMES` | 3 | Số frame liên tiếp để xác nhận sự kiện trước khi cảnh báo |
-| `MODEL_INPUT_SIZE` | (640, 384) | Kích thước input model |
-| `CONF_THRESH` | 0.35 | Ngưỡng confidence detection || `CAMERA_ROIS` | — | Polygon vùng cấm (INTRUSION) / vùng rủi ro cháy (SMOKE_FIRE) |
-| `INTRUSION_DWELL_FRAMES` | 5 | Số frame lưu lại trong vùng cấm để xác nhận xâm nhập |
+| Nhóm | Tham số | Giá trị mặc định | Ý nghĩa |
+|---|---|---|---|
+| CPU | `AI_MAX_THREADS` | 4 | PyTorch/OpenMP dùng tối đa N thread (không chiếm 12) |
+| CPU | `AI_WORKER_POOL_SIZE` | 2 | Worker pool dùng chung cho mọi camera |
+| Cadence | `AI_DETECT_FPS` / `AI_FIRE_FPS` / `AI_ACCIDENT_FPS` | 5 / 1.5 / 1.5 | Điều chỉnh nhịp AI |
+| Gate xe | `VEHICLE_COLLISION_MIN_CONF` | 0.65 | Conf xe tối thiểu để vào collision pipeline |
+| Score | `FALL_W_*`, `FIGHT_W_*`, `COLLISION_W_*`, `FIRE_W_*`, `SMOKE_W_*` | — | Trọng số công thức (Rule 6), tổng = 1 |
+| Confirm | `*_CANDIDATE_THRESH` / `*_CONFIRM_THRESH` / `*_CONFIRM_FRAMES` | — | Cấu hình candidate → confirmed từng event |
+| Khói | `SMOKE_MIN_EXPANSION` | 0.05 | Rule 6E: khói phải lan rộng |
+| Embedding | `EMBEDDING_ENABLED`, `EMBED_QUEUE_MAXSIZE` | True / 32 | Async embedding |
+| Camera | `CAMERA_STREAMS` | cam09, cam10 | Đường dẫn/URL video |
 
-Thay đổi ngưỡng phát hiện (ngã, xô xát, va chạm...) ngay trong `config.py`.
+## Tests (Rule 15)
 
-## Các event types (Phase 1)
+```bash
+python -m unittest discover -s tests -t . -v
+```
 
-| Event | Mô tả |
+Coverage: false-positive của fall/fight/collision/fire/smoke/intrusion + matrix candidate→confirmed + trọng số score + cadence scheduler (fire/accident không bị nuốt bởi detect tick).
+
+## Event types (Phase 1)
+
+| Event | Cơ chế phát hiện |
 |---|---|
-| `HUMAN_FALL` | Người ngã (aspect ratio / torso angle + gia tốc rơi) |
-| `HUMAN_CONFLICT` | Xô xát / giằng co (kinetic + biến thiên khoảng cách) |
-| `VEHICLE_COLLISION` | Va chạm xe-xe (proximity + tình trạng xe: giảm tốc/đổi hướng/nghiêng lật) |
-| `FIRE_DETECTED` | Cháy trong vùng quan sát (khói là điều kiện hỗ trợ) |
-| `RESTRICTED_INTRUSION` | Xâm nhập khu vực cấm |
+| `HUMAN_FALL` | FallScore: posture + vertical motion + aspect change + center velocity + temporal |
+| `HUMAN_CONFLICT` | FightScore: person-pair + contact + relative motion + intensity + temporal |
+| `VEHICLE_COLLISION` | CollisionScore: track stability + relative velocity + closing + geometry + velocity change |
+| `FIRE_DETECTED` | FireScore: model + spatial + temporal + motion (flicker) + smoke corroboration |
+| `SMOKE_DETECTED` | SmokeScore: model + temporal + spatial expansion + shape |
+| `RESTRICTED_INTRUSION` | depth check + movement + dwell time trong polygon |

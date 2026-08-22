@@ -1,12 +1,16 @@
 import cv2
 import numpy as np
+from typing import Any
+
 import config
+from tracker.memory_manager import ObjectMemoryManager
 
 
 class EventVisualizer:
     """Vẽ Visual ROI, Bounding Box, Pose & Banner Alert trực tiếp lên hình ảnh Video."""
 
-    def draw(self, frame, memory_manager, active_events, camera_id="cam09"):
+    def draw(self, frame: Any, memory_manager: ObjectMemoryManager,
+             active_events: list, camera_id: str = "cam09") -> Any:
         canvas = frame.copy()
 
         # 1. Vẽ các Polygon ROI
@@ -76,6 +80,8 @@ class EventVisualizer:
             if box is not None:
                 if ev["event_type"] == "FIRE_DETECTED":
                     color = (0, 0, 255)  # đỏ cho lửa
+                elif ev["event_type"] == "SMOKE_DETECTED":
+                    color = (128, 128, 128)  # xám cho khói
                 elif ev["event_type"] == "HUMAN_CONFLICT":
                     color = (0, 0, 255)
                 else:
@@ -83,7 +89,7 @@ class EventVisualizer:
                 cv2.rectangle(canvas, (box[0], box[1]), (box[2], box[3]), color, 2)
                 cv2.putText(
                     canvas,
-                    ev["event_type"],
+                    f"{ev['event_type']} ({ev.get('stage', '')})",
                     (box[0], box[1] - 8),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.5,

@@ -19,7 +19,6 @@ class TrackedObjectState:
         self.center_history = deque(maxlen=maxlen)     # [cx, cy]
         self.velocity_history = deque(maxlen=maxlen)   # [vx, vy]
         self.accel_history = deque(maxlen=maxlen)      # [ax, ay]
-        self.direction_history = deque(maxlen=maxlen)  # Radian / Angle
         self.pose_history = deque(maxlen=maxlen)       # Keypoints (nếu có)
         self.time_history = deque(maxlen=maxlen)       # Timestamps
 
@@ -30,6 +29,7 @@ class TrackedObjectState:
         self.missed_frames = 0  # Số frame liên tiếp không được detect thật (để dọn dấu cũ)
         self.last_update_predicted = False  # Frame gần nhất là dự đoán (không phải detection thật)
         self.predicted_bbox = None  # Bbox dự đoán hiển thị tạm; KHÔNG ghi vào history kinematics
+        self.conf = 0.0  # Confidence detect gần nhất (gate collision pipeline Rule 6C)
 
         # Event Persistence Counters
         # Đếm số detection frame liên tiếp mà object ở trong trạng thái event.
@@ -52,19 +52,15 @@ class TrackedObjectState:
                 acc = (vel - self.velocity_history[-1]) / dt
             else:
                 acc = np.array([0.0, 0.0], dtype=np.float32)
-
-            direction = np.arctan2(vel[1], vel[0])
         else:
             vel = np.array([0.0, 0.0], dtype=np.float32)
             acc = np.array([0.0, 0.0], dtype=np.float32)
-            direction = 0.0
 
         # Push to Deques
         self.bbox_history.append(bbox)
         self.center_history.append(center)
         self.velocity_history.append(vel)
         self.accel_history.append(acc)
-        self.direction_history.append(direction)
         self.time_history.append(timestamp)
         if pose is not None:
             self.pose_history.append(pose)

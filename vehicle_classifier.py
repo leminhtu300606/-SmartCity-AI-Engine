@@ -1,4 +1,5 @@
 import os
+import threading
 
 import cv2
 from ultralytics import YOLO
@@ -28,7 +29,11 @@ class VehicleTypeClassifier:
         self.enabled = config.VEHICLE_CLS_ENABLED
         self.model = None
         self.names = {}
-        self.votes = {}  # track_id -> {label: count} đa số theo cửa sổ trượt
+        # vote key = (camera_id, track_id) — model DÙNG CHUNG cho mọi camera,
+        # nên state của track phải được ngăn theo camera (Rule 1 + Rule 10:
+        # AI state per-camera, không chia sẻ state giữa các camera).
+        self.votes = {}
+        self._lock = threading.Lock()
         if self.enabled:
             path = config.VEHICLE_CLS_MODEL_PATH
             if os.path.exists(path):
@@ -46,11 +51,12 @@ class VehicleTypeClassifier:
     def available(self):
         return self.model is not None
 
-    def classify(self, frame_bgr, bbox, track_id=None):
+    def classify(self, frame_bgr, bbox, track_id=None, camera_id=None):
         """Phân loại crop xe -> (tên tiếng Việt, conf). Trả (None, 0.0) nếu bỏ qua.
 
         Nếu truyền track_id, kết quả nằm trong bộ đếm đa số (majority vote)
         theo thời gian → trả nhãn CHỈ khi cửa sổ vote xác nhận.
+        camera_id dùng để ngăn state vote giữa các camera (model dùng chung).
         """
         if not self.available:
             return None, 0.0
@@ -75,8 +81,8 @@ class VehicleTypeClassifier:
         if track_id is None:
             return label, conf
 
-        self._record_vote(track_id, label, conf)
-        return self._resolve_vote(track_id)
+        self._record_vote(camera_id, track_id, label, conf)
+        return self._resolve_vote(camera_id, track_id)
 
     # ----------------------------------------------------------------
     # CROP — chống che khuất / xe không hoàn chỉnh
@@ -122,10 +128,11 @@ class VehicleTypeClassifier:
     # ----------------------------------------------------------------
     # MAJORITY VOTE theo track (chống frame độc lập sai khi bị che)
     # ----------------------------------------------------------------
-    def _record_vote(self, track_id, label, conf):
+    def _record_vote(self, camera_id, track_id, label, conf):
         if conf < config.VEHICLE_CLS_MIN_CONF:
             return  # frame phân loại thiếu chắc chắn -> không ghi
-        v = self.votes.setdefault(track_id, {})
+        key = (camera_id, track_id)
+        v = self.votes.setdefault(key, {})
         v[label] = v.get(label, 0) + 1
         # Cửa sổ trượt: khi vượt VOTE_KEEP, chia 2 toàn bộ để giữ phần mới
         total = sum(v.values())
@@ -135,9 +142,9 @@ class VehicleTypeClassifier:
             for k in [k for k, c in v.items() if c == 0]:
                 del v[k]
 
-    def _resolve_vote(self, track_id):
+    def _resolve_vote(self, camera_id, track_id):
         """Chốt nhãn theo đa số trong cửa sổ vote. Trả (None, 0.0) khi chưa đủ."""
-        v = self.votes.get(track_id, {})
+        v = self.votes.get((camera_id, track_id), {})
         if not v:
             return None, 0.0
         total = sum(v.values())
@@ -153,11 +160,12 @@ class VehicleTypeClassifier:
         conf = min(1.0, 0.5 + 0.1 * best_c / config.VEHICLE_CLS_VOTE_MIN)
         return best, conf
 
-    def prune_votes(self, active_track_ids):
-        """Xoá vote của các track đã mất dấu."""
+    def prune_votes(self, active_track_ids, camera_id=None):
+        """Xoá vote của các track đã mất dấu (chỉ trong phạm vi camera)."""
         active = set(active_track_ids)
-        for tid in [t for t in self.votes if t not in active]:
-            del self.votes[tid]
+        with self._lock:
+            for tid in [t for t in self.votes if t[1] not in active and t[0] == camera_id]:
+                del self.votes[tid]
 
     def _to_vietnamese(self, raw):
         return config.VEHICLE_CLS_NAME_MAP.get(raw, raw)

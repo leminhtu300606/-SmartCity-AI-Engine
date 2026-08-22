@@ -32,6 +32,9 @@ class AlertStore:
     def record(self, camera_id, event, frame_bgr):
         """Mã hoá ảnh vào bộ nhớ + thêm alert cho dashboard.
 
+        Rule 7/8: CHỈ chấp nhận event CONFIRMED (đã qua temporal confirmation).
+        Candidate (score thấp / chưa đủ frame) không được snapshot/lưu/log.
+
         Args:
             camera_id: ID camera.
             event: dict event (event_type, description, confidence, bbox...).
@@ -40,6 +43,8 @@ class AlertStore:
         Returns:
             dict alert đã lưu (kèm key ảnh full + crop trong bộ nhớ).
         """
+        if event.get("stage") != config.STAGE_CONFIRMED:
+            return None  # CANDIDATE/DETECTED — KHÔNG snapshot (Rule 7/8)
         if frame_bgr is None:
             return None
 
@@ -76,6 +81,7 @@ class AlertStore:
             "time_str": time.strftime("%H:%M:%S", time.localtime(ts)),
             "camera_id": camera_id,
             "event_type": ev_type,
+            "stage": event.get("stage", ""),
             "description": event.get("description", ""),
             "confidence": round(float(event.get("confidence", 0.0)), 3),
             "track_ids": list(event.get("track_ids", [])),
@@ -141,7 +147,7 @@ class AlertStore:
             )
         line = (
             f"[{alert['time_str']}] [{alert['camera_id']}] "
-            f"{alert['event_type']} | conf={alert['confidence']} | "
+            f"{alert['event_type']}({alert.get('stage','')}) | conf={alert['confidence']} | "
             f"bbox=[{bbox_str}] | {alert['description']} | "
             f"evidence={evidence_str} | "
             f"snapshot={alert['snapshot']} crop={alert['crop']}\n"

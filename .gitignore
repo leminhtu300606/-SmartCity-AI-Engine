@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+venv/
+
+# Runtime / generated data
+snapshots/*.log
+snapshots/alerts.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp

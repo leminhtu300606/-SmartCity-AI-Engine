@@ -19,6 +19,7 @@ EVENT_COLORS = {
     "VEHICLE_COLLISION": "#ff9800",
     "FIRE_DETECTED": "#f44336",
     "RESTRICTED_INTRUSION": "#d32f2f",
+    "SMOKE_DETECTED": "#9e9e9e",
 }
 
 _INDEX_HTML = """<!DOCTYPE html>
@@ -92,6 +93,7 @@ _INDEX_HTML = """<!DOCTYPE html>
   <button data-type="HUMAN_CONFLICT">Xô xát</button>
   <button data-type="VEHICLE_COLLISION">Xe-xe</button>
   <button data-type="FIRE_DETECTED">Lửa</button>
+  <button data-type="SMOKE_DETECTED">Khói</button>
   <button data-type="RESTRICTED_INTRUSION">Xâm nhập</button>
 </div>
 
